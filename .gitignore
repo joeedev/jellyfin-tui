@@ -8,3 +8,5 @@ covers/
 /.idea
 
 /.claude
+
+.direnv/
