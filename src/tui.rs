@@ -215,6 +215,7 @@ pub struct App {
     pub swap_play_pause: bool,
 
     pub cover_art: Option<StatefulProtocol>,
+    pub cover_art_fullscreen: Option<StatefulProtocol>,
     pub cover_art_path: String,
     cover_art_dir: String,
     pub picker: Option<Picker>,
@@ -286,6 +287,13 @@ pub struct App {
     pub db: DatabaseWrapper,
 
     pub last_term_size: (u16, u16), // Last known terminal size used to trigger full redraw
+
+    pub fullscreen: bool,
+    pub visualizer_bars: Vec<f64>, // current bar heights (0.0..1.0)
+    #[cfg(feature = "visualizer")]
+    pub audio_capture: Option<crate::audio_capture::AudioCapture>,
+    #[cfg(feature = "visualizer")]
+    pub virtual_sink: crate::audio_capture::VirtualSink,
 }
 
 impl App {
@@ -364,8 +372,15 @@ impl App {
             network_quality.clone(),
         ));
 
+        // create virtual audio sink for visualizer (must happen before mpv init)
+        #[cfg(feature = "visualizer")]
+        let virtual_sink = crate::audio_capture::VirtualSink::create();
+
         // connect to mpv, set options and default properties
-        let mpv_handle = MpvHandle::new(&config, sender);
+        #[cfg(feature = "visualizer")]
+        let mpv_handle = MpvHandle::new(&config, sender, virtual_sink.mpv_audio_device());
+        #[cfg(not(feature = "visualizer"))]
+        let mpv_handle = MpvHandle::new(&config, sender, None);
 
         // mpris
         let controls = match mpris::mpris() {
@@ -491,6 +506,7 @@ impl App {
                 .unwrap_or(false),
 
             cover_art: None,
+            cover_art_fullscreen: None,
             cover_art_path: String::from(""),
             cover_art_dir: data_dir()
                 .unwrap_or_else(|| PathBuf::from("./"))
@@ -565,6 +581,13 @@ impl App {
             db,
 
             last_term_size: (0, 0),
+
+            fullscreen: false,
+            visualizer_bars: vec![0.0; 64],
+            #[cfg(feature = "visualizer")]
+            audio_capture: None,
+            #[cfg(feature = "visualizer")]
+            virtual_sink,
         }
     }
 }
@@ -1117,6 +1140,21 @@ impl App {
             self.dirty = true;
         }
 
+        // update visualizer bars from audio capture
+        if self.fullscreen {
+            #[cfg(feature = "visualizer")]
+            if let Some(ref capture) = self.audio_capture {
+                let mut got_update = false;
+                while let Ok(spectrum) = capture.spectrum_rx.try_recv() {
+                    self.visualizer_bars = spectrum;
+                    got_update = true;
+                }
+                if got_update {
+                    self.dirty = true;
+                }
+            }
+        }
+
         // interpolate auto color
         let dt = (now - self.last_theme_lerp).as_millis().min(33) as u64;
         self.last_theme_lerp = now;
@@ -1556,8 +1594,8 @@ impl App {
                     if let Ok(reader) = image::ImageReader::open(&p) {
                         if let Ok(img) = reader.decode() {
                             if let Some(picker) = &mut self.picker {
-                                let image_fit_state = picker.new_resize_protocol(img.clone());
-                                self.cover_art = Some(image_fit_state);
+                                self.cover_art = Some(picker.new_resize_protocol(img.clone()));
+                                self.cover_art_fullscreen = Some(picker.new_resize_protocol(img.clone()));
                                 self.cover_art_path = p.clone();
                             }
                             self.grab_primary_color(&p);
@@ -1569,6 +1607,7 @@ impl App {
                 Err(_) => {
                     if second_attempt {
                         self.cover_art = None;
+                        self.cover_art_fullscreen = None;
                         self.cover_art_path.clear();
                     }
                 }
@@ -1582,8 +1621,8 @@ impl App {
             if let Ok(reader) = image::ImageReader::open(&cover_path) {
                 if let Ok(img) = reader.decode() {
                     if let Some(picker) = &mut self.picker {
-                        let image_fit_state = picker.new_resize_protocol(img.clone());
-                        self.cover_art = Some(image_fit_state);
+                        self.cover_art = Some(picker.new_resize_protocol(img.clone()));
+                        self.cover_art_fullscreen = Some(picker.new_resize_protocol(img.clone()));
                     }
                 }
             }
@@ -1704,6 +1743,11 @@ impl App {
         if let Some(background) = self.theme.resolve_opt(&self.theme.background) {
             let background_block = Block::default().style(Style::default().bg(background));
             frame.render_widget(background_block, frame.area());
+        }
+
+        if self.fullscreen {
+            self.render_fullscreen(frame);
+            return;
         }
 
         let app_container = Layout::default()

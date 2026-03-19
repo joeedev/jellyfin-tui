@@ -250,7 +250,11 @@ fn handle_command(mpv: &Mpv, cmd: MpvCommand, pending_resume: &mut Option<Pendin
 }
 
 impl MpvHandle {
-    pub fn new(config: &serde_yaml::Value, sender: Sender<MpvPlaybackState>) -> MpvHandle {
+    pub fn new(
+        config: &serde_yaml::Value,
+        sender: Sender<MpvPlaybackState>,
+        audio_device: Option<&str>,
+    ) -> MpvHandle {
         let mpv = Mpv::with_initializer(|mpv| {
             mpv.set_option("msg-level", "ffmpeg/demuxer=no").unwrap();
             Ok(())
@@ -259,6 +263,15 @@ impl MpvHandle {
         mpv.set_property("vo", "null").unwrap();
         mpv.set_property("volume", 100).unwrap();
         mpv.set_property("prefetch-playlist", "yes").unwrap(); // gapless playback
+
+        // Route audio to the virtual sink for the visualizer
+        if let Some(dev) = audio_device {
+            if let Err(e) = mpv.set_property("audio-device", dev) {
+                log::warn!("Failed to set audio-device to {dev}: {e}");
+            } else {
+                log::info!("mpv audio-device set to {dev}");
+            }
+        }
 
         // no console output (it shifts the tui around)
         let _ = mpv.set_property("quiet", "yes");

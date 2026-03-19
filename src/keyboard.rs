@@ -121,6 +121,8 @@ pub enum Action {
     Cancel,
     /// Toggle help
     Help,
+    /// Toggle full-screen player view
+    ToggleFullscreen,
     /// Open a popup (context-sensitive)
     Popup,
     /// Open the global popup with additional settings
@@ -197,6 +199,7 @@ impl Action {
             Action::WidenPane => Cow::Borrowed("Widen pane"),
             Action::ShrinkPane => Cow::Borrowed("Shrink pane"),
             Action::Help => Cow::Borrowed("Open help"),
+            Action::ToggleFullscreen => Cow::Borrowed("Toggle fullscreen player"),
             // System
             Action::Quit => Cow::Borrowed("Quit application"),
             Action::Shell(cmd) => Cow::Owned(format!("Run shell command: {}", cmd)),
@@ -253,7 +256,8 @@ impl Action {
             | Action::Popup
             | Action::GlobalPopup
             | Action::WidenPane
-            | Action::ShrinkPane => ActionCategory::UI,
+            | Action::ShrinkPane
+            | Action::ToggleFullscreen => ActionCategory::UI,
 
             Action::Quit | Action::Shell(_) | Action::Reset => ActionCategory::System,
         }
@@ -343,6 +347,8 @@ const DEFAULT_BINDINGS: &[(KeyCombination, Action)] = &[
     // popups
     (key!(shift - p), Action::GlobalPopup),
     (key!('p'), Action::Popup),
+    // fullscreen
+    (key!(shift - f), Action::ToggleFullscreen),
 ];
 
 pub fn try_load_keymap(
@@ -471,6 +477,29 @@ impl App {
             return;
         }
 
+        if self.fullscreen {
+            match action {
+                Action::Cancel | Action::ToggleFullscreen => {
+                    self.set_fullscreen(false);
+                }
+                Action::Quit => self.exit().await,
+                Action::PlayPause => match self.paused {
+                    true => self.play().await,
+                    false => self.pause().await,
+                },
+                Action::Stop => self.stop().await,
+                Action::Next => self.next().await,
+                Action::Previous => self.previous().await,
+                Action::Seek(secs) => self.execute_seek(*secs).await,
+                Action::VolumeUp => self.volume_up().await,
+                Action::VolumeDown => self.volume_down().await,
+                Action::Repeat => self.cycle_repeat_mode().await,
+                Action::Shuffle => self.toggle_shuffle().await,
+                _ => {}
+            }
+            return;
+        }
+
         if self.playlist_editing {
             match action {
                 Action::Enter => self.commit_playlist_edit().await,
@@ -544,6 +573,9 @@ impl App {
             Action::Delete => self.pop_from_queue().await,
             Action::Popup => self.request_popup(false).await,
             Action::GlobalPopup => self.request_popup(true).await,
+            Action::ToggleFullscreen => {
+                self.set_fullscreen(!self.fullscreen);
+            }
             // noops
             Action::DeleteBack => {}
             Action::Type(_) => {}
@@ -946,6 +978,10 @@ impl App {
 
             Action::SearchLocally => {
                 self.searching = true;
+            }
+
+            Action::ToggleFullscreen => {
+                self.set_fullscreen(!self.fullscreen);
             }
 
             _ => {}

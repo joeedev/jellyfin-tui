@@ -1,8 +1,11 @@
 #![cfg_attr(target_os = "macos", allow(unexpected_cfgs))]
+#[cfg(feature = "visualizer")]
+mod audio_capture;
 mod client;
 mod config;
 mod database;
 mod discord;
+mod fullscreen;
 mod help;
 mod helpers;
 mod keyboard;
