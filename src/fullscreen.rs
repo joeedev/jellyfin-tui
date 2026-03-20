@@ -58,6 +58,22 @@ impl App {
 
         // Render track info + progress bar at the bottom, matched to art width
         self.render_fullscreen_player(frame, bottom_area, art_rect);
+
+        // Temporarily show the top bar when a setting changes (volume, repeat, shuffle)
+        if self.fullscreen_topbar_until.is_some_and(|t| t > tokio::time::Instant::now()) {
+            let topbar_area = Rect {
+                x: area.x,
+                y: area.y,
+                width: area.width,
+                height: 1,
+            };
+            // Clear the row first so visualizer bars don't bleed through
+            let clear = Block::default().style(Style::default().bg(
+                self.theme.resolve_opt(&self.theme.background).unwrap_or(Color::Black),
+            ));
+            frame.render_widget(clear, topbar_area);
+            self.render_status_bar(topbar_area, frame.buffer_mut());
+        }
     }
 
     fn render_visualizer_bars(&self, frame: &mut Frame, area: Rect) {

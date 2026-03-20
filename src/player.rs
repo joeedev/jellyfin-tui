@@ -1,9 +1,20 @@
+use std::time::Duration;
+use tokio::time::Instant;
+
 use crate::database::database::{Command, JellyfinCommand};
 use crate::keyboard::ActiveSection;
 use crate::popup::PopupMenu;
 use crate::tui::{App, Repeat};
 
+const TOPBAR_DISPLAY_DURATION: Duration = Duration::from_secs(2);
+
 impl App {
+    /// Flash the top bar in fullscreen mode so the user can see the current settings.
+    fn flash_fullscreen_topbar(&mut self) {
+        if self.fullscreen {
+            self.fullscreen_topbar_until = Some(Instant::now() + TOPBAR_DISPLAY_DURATION);
+        }
+    }
     pub async fn play(&mut self) {
         if !self.paused || self.stopped {
             return;
@@ -129,6 +140,7 @@ impl App {
         }
         self.mpv_handle.set_repeat(self.preferences.repeat).await;
         let _ = self.preferences.save();
+        self.flash_fullscreen_topbar();
     }
 
     pub async fn global_shuffle(&mut self) {
@@ -158,6 +170,7 @@ impl App {
                 self.state.shuffle = true;
             }
         }
+        self.flash_fullscreen_topbar();
     }
 
     pub async fn volume_up(&mut self) {
@@ -171,6 +184,7 @@ impl App {
                     controls.set_volume(self.state.current_playback_state.volume as f64 / 100.0);
             }
         }
+        self.flash_fullscreen_topbar();
     }
 
     pub async fn volume_down(&mut self) {
@@ -186,5 +200,6 @@ impl App {
                     controls.set_volume(self.state.current_playback_state.volume as f64 / 100.0);
             }
         }
+        self.flash_fullscreen_topbar();
     }
 }

@@ -289,6 +289,7 @@ pub struct App {
     pub last_term_size: (u16, u16), // Last known terminal size used to trigger full redraw
 
     pub fullscreen: bool,
+    pub fullscreen_topbar_until: Option<Instant>,
     pub visualizer_bars: Vec<f64>, // current bar heights (0.0..1.0)
     #[cfg(feature = "visualizer")]
     pub audio_capture: Option<crate::audio_capture::AudioCapture>,
@@ -583,6 +584,7 @@ impl App {
             last_term_size: (0, 0),
 
             fullscreen: false,
+            fullscreen_topbar_until: None,
             visualizer_bars: vec![0.0; 64],
             #[cfg(feature = "visualizer")]
             audio_capture: None,
@@ -1152,6 +1154,14 @@ impl App {
                 if got_update {
                     self.dirty = true;
                 }
+            }
+        }
+
+        // expire the fullscreen top bar overlay
+        if let Some(until) = self.fullscreen_topbar_until {
+            if now >= until {
+                self.fullscreen_topbar_until = None;
+                self.dirty = true;
             }
         }
 
@@ -1785,6 +1795,19 @@ impl App {
         }
     }
 
+    pub(crate) fn render_status_bar(&self, area: Rect, buf: &mut Buffer) {
+        let layout = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(vec![
+                Constraint::Percentage(100),
+                Constraint::Min(15),
+            ])
+            .split(area);
+
+        self.render_status_indicators(layout[0], buf);
+        self.render_volume_gauge(layout[1], buf);
+    }
+
     fn render_tabs(&self, area: Rect, buf: &mut Buffer) {
         // split the area into left and right
         let tabs_layout = Layout::default()
@@ -1806,6 +1829,11 @@ impl App {
             .padding(" ", " ")
             .render(tabs_layout[0], buf);
 
+        self.render_status_indicators(tabs_layout[1], buf);
+        self.render_volume_gauge(tabs_layout[2], buf);
+    }
+
+    fn render_status_indicators(&self, area: Rect, buf: &mut Buffer) {
         let mut status_bar: Vec<Span> = vec![];
 
         if self.mpv_handle.dead.load(Ordering::Relaxed) {
@@ -1847,15 +1875,6 @@ impl App {
             .fg(self.theme.resolve(&self.theme.foreground)),
         );
 
-        let volume_color = match self.state.current_playback_state.volume {
-            0..=100 => (
-                self.theme.resolve(&self.theme.foreground),
-                self.theme.resolve(&self.theme.progress_fill),
-            ),
-            101..=120 => (Color::Yellow, Color::Yellow),
-            _ => (Color::Red, Color::Red),
-        };
-
         let mut spaced = Vec::new();
         let mut iterator = status_bar.into_iter();
         if let Some(first) = iterator.next() {
@@ -1872,7 +1891,18 @@ impl App {
         Paragraph::new(Line::from(spaced))
             .alignment(Alignment::Right)
             .wrap(Wrap { trim: false })
-            .render(tabs_layout[1], buf);
+            .render(area, buf);
+    }
+
+    fn render_volume_gauge(&self, area: Rect, buf: &mut Buffer) {
+        let volume_color = match self.state.current_playback_state.volume {
+            0..=100 => (
+                self.theme.resolve(&self.theme.foreground),
+                self.theme.resolve(&self.theme.progress_fill),
+            ),
+            101..=120 => (Color::Yellow, Color::Yellow),
+            _ => (Color::Red, Color::Red),
+        };
 
         LineGauge::default()
             .block(Block::default().padding(Padding::horizontal(1)))
@@ -1887,7 +1917,7 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             )
             .ratio((self.state.current_playback_state.volume as f64 / 100.0).clamp(0.0, 1.0))
-            .render(tabs_layout[2], buf);
+            .render(area, buf);
     }
 
     /// Fetch the discography of an artist
