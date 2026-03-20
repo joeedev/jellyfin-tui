@@ -290,6 +290,8 @@ pub struct App {
 
     pub fullscreen: bool,
     pub fullscreen_topbar_until: Option<Instant>,
+    pub fullscreen_show_art: bool,
+    pub fullscreen_show_visualizer: bool,
     pub visualizer_bars: Vec<f64>, // current bar heights (0.0..1.0)
     #[cfg(feature = "visualizer")]
     pub audio_capture: Option<crate::audio_capture::AudioCapture>,
@@ -585,6 +587,8 @@ impl App {
 
             fullscreen: false,
             fullscreen_topbar_until: None,
+            fullscreen_show_art: true,
+            fullscreen_show_visualizer: true,
             visualizer_bars: vec![0.0; 64],
             #[cfg(feature = "visualizer")]
             audio_capture: None,

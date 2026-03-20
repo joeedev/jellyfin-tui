@@ -448,6 +448,25 @@ impl App {
             }
         }
 
+        // In fullscreen, handle keys that overlap with normal-mode bindings
+        if self.fullscreen {
+            if let KeyCode::Char(c) = key_event.code {
+                match c {
+                    'a' => {
+                        self.fullscreen_show_art = !self.fullscreen_show_art;
+                        self.dirty = true;
+                        return;
+                    }
+                    'v' => {
+                        self.fullscreen_show_visualizer = !self.fullscreen_show_visualizer;
+                        self.dirty = true;
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         if let Some(action) = self.keymap.get(&combo).cloned() {
             self.dirty = true;
             self.route_action(&action).await;

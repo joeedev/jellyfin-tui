@@ -51,10 +51,16 @@ impl App {
         let bottom_area = layout[1];
 
         // Render visualizer bars across the full top area (behind the art)
-        self.render_visualizer_bars(frame, top_area);
+        if self.fullscreen_show_visualizer {
+            self.render_visualizer_bars(frame, top_area);
+        }
 
         // Render album art centered in the top area
-        let art_rect = self.render_fullscreen_art(frame, top_area);
+        let art_rect = if self.fullscreen_show_art {
+            self.render_fullscreen_art(frame, top_area)
+        } else {
+            None
+        };
 
         // Render track info + progress bar at the bottom, matched to art width
         self.render_fullscreen_player(frame, bottom_area, art_rect);
