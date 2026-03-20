@@ -103,8 +103,11 @@ impl App {
         }
 
         if let Some(cover_art) = self.cover_art_fullscreen.as_mut() {
-            let art_max_height = area.height.saturating_sub(6);
-            let art_max_width = area.width.saturating_sub(12);
+            // Scale padding with terminal size; remove at small sizes
+            let v_pad = if area.height < 20 { 1 } else if area.height < 30 { 2 } else { 6 };
+            let h_pad = if area.width < 40 { 2 } else if area.width < 80 { 4 } else { 12 };
+            let art_max_height = area.height.saturating_sub(v_pad);
+            let art_max_width = area.width.saturating_sub(h_pad);
 
             let art_area = Rect {
                 x: area.x,
@@ -116,11 +119,12 @@ impl App {
             let img = StatefulImage::default().resize(Resize::Scale(None));
             let img_size = cover_art.size_for(Resize::Scale(None), art_area);
 
+            let art_y = (area.y + (area.height.saturating_sub(img_size.height)) / 2).max(area.y + 1);
             let centered = Rect {
-                x: area.x + (area.width.saturating_sub(img_size.width)) / 2,
-                y: area.y + (area.height.saturating_sub(img_size.height)) / 2,
+                x: area.x + (area.width.saturating_sub(img_size.width)) / 2 + 1,
+                y: art_y,
                 width: img_size.width,
-                height: img_size.height,
+                height: img_size.height.min((area.y + area.height).saturating_sub(art_y + 1)),
             };
 
             frame.render_stateful_widget(img, centered, cover_art);
@@ -138,8 +142,12 @@ impl App {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        // Slightly wider than the album art, or fall back to ~20% padding
-        let h_pad = if let Some(art) = art_rect {
+        // Padding based on width; shrinks at small sizes
+        let h_pad = if inner.width < 40 {
+            1
+        } else if inner.width < 80 {
+            (inner.width / 10).max(2)
+        } else if let Some(art) = art_rect {
             let art_left = art.x.saturating_sub(inner.x);
             let art_right = inner.width.saturating_sub(art_left + art.width);
             let margin = art_left.min(art_right);
