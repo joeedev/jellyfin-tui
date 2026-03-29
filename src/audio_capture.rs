@@ -208,10 +208,20 @@ fn capture_loop(
         .arg("-p")
         .arg(&config_path)
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()?;
 
     let stdout = child.stdout.take().ok_or("cava: no stdout")?;
+
+    // Log cava's stderr in a background thread so errors are visible
+    if let Some(stderr) = child.stderr.take() {
+        thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(stderr).lines().map_while(Result::ok) {
+                log::warn!("cava stderr: {}", line);
+            }
+        });
+    }
     let mut reader = std::io::BufReader::new(stdout);
 
     let frame_bytes = BAR_COUNT * 2; // 16-bit little-endian per bar
