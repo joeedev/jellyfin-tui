@@ -14,6 +14,11 @@ use std::thread;
 pub const BAR_COUNT: usize = 64;
 const FRAMERATE: u32 = 60;
 
+#[cfg(target_os = "macos")]
+const INPUT_METHOD: &str = "coreaudio";
+#[cfg(not(target_os = "macos"))]
+const INPUT_METHOD: &str = "pulse";
+
 const NULL_SINK_NAME: &str = "jellyfin_tui_vis";
 const COMBINE_SINK_NAME: &str = "jellyfin_tui_combined";
 
@@ -186,7 +191,7 @@ fn capture_loop(
          framerate = {FRAMERATE}\n\
          \n\
          [input]\n\
-         method = pulse\n\
+         method = {INPUT_METHOD}\n\
          source = {source}\n\
          \n\
          [output]\n\
