@@ -55,12 +55,13 @@ impl App {
             self.render_visualizer_bars(frame, top_area);
         }
 
+        // Always compute art rect so player info padding stays consistent
+        let art_rect = self.art_layout_rect(top_area);
+
         // Render album art centered in the top area
-        let art_rect = if self.fullscreen_show_art {
-            self.render_fullscreen_art(frame, top_area)
-        } else {
-            None
-        };
+        if self.fullscreen_show_art {
+            self.render_fullscreen_art(frame, art_rect);
+        }
 
         // Render track info + progress bar at the bottom, matched to art width
         self.render_fullscreen_player(frame, bottom_area, art_rect);
@@ -133,40 +134,38 @@ impl App {
         }
     }
 
-    fn render_fullscreen_art(&mut self, frame: &mut Frame, area: Rect) -> Option<Rect> {
+    /// Compute where the album art would be rendered, without rendering it.
+    /// Used to keep player info padding stable whether or not art is visible.
+    fn art_layout_rect(&self, area: Rect) -> Option<Rect> {
         if area.height < 4 {
             return None;
         }
+        let cover_art = self.cover_art_fullscreen.as_ref()?;
 
+        let v_pad = if area.height < 20 { 1 } else if area.height < 30 { 2 } else { 6 };
+        let h_pad = if area.width < 40 { 2 } else if area.width < 80 { 4 } else { 12 };
+        let art_area = Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width.saturating_sub(h_pad),
+            height: area.height.saturating_sub(v_pad),
+        };
+
+        let img_size = cover_art.size_for(Resize::Scale(None), art_area);
+        let art_y = (area.y + (area.height.saturating_sub(img_size.height)) / 2).max(area.y + 1);
+        Some(Rect {
+            x: area.x + (area.width.saturating_sub(img_size.width)) / 2 + 1,
+            y: art_y,
+            width: img_size.width,
+            height: img_size.height.min((area.y + area.height).saturating_sub(art_y + 1)),
+        })
+    }
+
+    fn render_fullscreen_art(&mut self, frame: &mut Frame, rect: Option<Rect>) {
+        let Some(centered) = rect else { return };
         if let Some(cover_art) = self.cover_art_fullscreen.as_mut() {
-            // Scale padding with terminal size; remove at small sizes
-            let v_pad = if area.height < 20 { 1 } else if area.height < 30 { 2 } else { 6 };
-            let h_pad = if area.width < 40 { 2 } else if area.width < 80 { 4 } else { 12 };
-            let art_max_height = area.height.saturating_sub(v_pad);
-            let art_max_width = area.width.saturating_sub(h_pad);
-
-            let art_area = Rect {
-                x: area.x,
-                y: area.y,
-                width: art_max_width,
-                height: art_max_height,
-            };
-
             let img = StatefulImage::default().resize(Resize::Scale(None));
-            let img_size = cover_art.size_for(Resize::Scale(None), art_area);
-
-            let art_y = (area.y + (area.height.saturating_sub(img_size.height)) / 2).max(area.y + 1);
-            let centered = Rect {
-                x: area.x + (area.width.saturating_sub(img_size.width)) / 2 + 1,
-                y: art_y,
-                width: img_size.width,
-                height: img_size.height.min((area.y + area.height).saturating_sub(art_y + 1)),
-            };
-
             frame.render_stateful_widget(img, centered, cover_art);
-            Some(centered)
-        } else {
-            None
         }
     }
 
