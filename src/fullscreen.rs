@@ -91,9 +91,23 @@ impl App {
         let primary = self.theme.primary_color;
         let buf = frame.buffer_mut();
 
+        // Easter egg: rainbow bars when playing "In Rainbows"
+        let is_in_rainbows = self
+            .state
+            .queue
+            .get(self.state.current_playback_state.current_index)
+            .map(|s| s.album.to_lowercase() == "in rainbows")
+            .unwrap_or(false);
+
         for col in 0..area.width {
             let bar_idx = ((col as f64 / area.width as f64) * bar_count as f64) as usize;
             let bar_val = self.visualizer_bars[bar_idx.min(bar_count - 1)];
+
+            let bar_color = if is_in_rainbows {
+                rainbow_color(col, area.width)
+            } else {
+                primary
+            };
 
             for row in 0..area.height {
                 let row_from_bottom = area.height - 1 - row;
@@ -109,7 +123,7 @@ impl App {
                     let ch = BAR_CHARS[char_idx.min(BAR_CHARS.len() - 1)];
 
                     let brightness = 1.0 - (row_from_bottom as f64 / area.height as f64) * 0.9;
-                    let color = dim_color(primary, brightness * 0.5);
+                    let color = dim_color(bar_color, brightness * 0.5);
 
                     if let Some(cell) = buf.cell_mut((x, y)) {
                         cell.set_char(ch).set_fg(color);
@@ -379,6 +393,33 @@ impl App {
             layout[2],
         );
     }
+}
+
+/// Returns a rainbow color interpolated across the width (ROYGBIV, for the "In Rainbows" easter egg)
+fn rainbow_color(col: u16, width: u16) -> Color {
+    const RAINBOW: &[(u8, u8, u8)] = &[
+        (255, 0, 0),   // red
+        (255, 127, 0), // orange
+        (255, 255, 0), // yellow
+        (0, 200, 0),   // green
+        (0, 0, 255),   // blue
+        (75, 0, 130),  // indigo
+        (148, 0, 211), // violet
+    ];
+
+    let t = col as f64 / width.max(1) as f64 * (RAINBOW.len() - 1) as f64;
+    let lo = t as usize;
+    let hi = (lo + 1).min(RAINBOW.len() - 1);
+    let frac = t - lo as f64;
+
+    let (r1, g1, b1) = RAINBOW[lo];
+    let (r2, g2, b2) = RAINBOW[hi];
+
+    Color::Rgb(
+        (r1 as f64 + (r2 as f64 - r1 as f64) * frac) as u8,
+        (g1 as f64 + (g2 as f64 - g1 as f64) * frac) as u8,
+        (b1 as f64 + (b2 as f64 - b1 as f64) * frac) as u8,
+    )
 }
 
 /// Dim a color by a factor (0.0 = black, 1.0 = original)
