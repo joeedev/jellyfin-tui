@@ -15,7 +15,7 @@ pub const BAR_COUNT: usize = 64;
 const FRAMERATE: u32 = 60;
 
 #[cfg(target_os = "macos")]
-const INPUT_METHOD: &str = "coreaudio";
+const INPUT_METHOD: &str = "portaudio";
 #[cfg(not(target_os = "macos"))]
 const INPUT_METHOD: &str = "pulse";
 
