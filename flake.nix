@@ -96,7 +96,12 @@
           let
             pkgs = import nixpkgs {
               inherit system;
-              overlays = [ (import rust-overlay) ];
+              overlays = [
+                (import rust-overlay)
+                (final: prev: {
+                  iniparser = prev.iniparser.overrideAttrs (_: { doCheck = false; });
+                })
+              ];
             };
             toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
           in
