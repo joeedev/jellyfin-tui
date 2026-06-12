@@ -312,11 +312,11 @@ impl App {
                 .label(Line::from(format!(
                     "{}   {:.0}% ",
                     if self.buffering {
-                        self.spinner_stages[self.spinner]
+                        self.spinner_stages[self.spinner].as_str()
                     } else if self.paused ^ self.swap_play_pause {
-                        "⏸︎"
+                        &self.symbols.pause
                     } else {
-                        "►"
+                        &self.symbols.play
                     },
                     percentage,
                 ))),
