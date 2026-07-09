@@ -217,6 +217,7 @@ pub struct App {
     tab_labels: [String; 4],
     config_watcher: crate::themes::theme::ConfigWatcher,
     pub auto_color: bool, // grab color from cover art (coolest feature ever omg)
+    pub rgb: crate::rgb::RgbSync, // sync RGB lighting to the album color via OpenRGB
     pub border_type: BorderType,
 
     pub original_artists: Vec<Artist>,     // all artists
@@ -487,6 +488,9 @@ impl App {
             _ => (true, default_title_fmt.to_string()),
         };
 
+        let fade_ms =
+            config.get("auto_color_fade_ms").and_then(|v| v.as_u64()).unwrap_or(500);
+
         Self {
             exit: false,
             dirty: true,
@@ -509,10 +513,7 @@ impl App {
             theme,
             themes: user_themes,
             last_theme_lerp: Instant::now(),
-            auto_color_fade_ms: config
-                .get("auto_color_fade_ms")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(500),
+            auto_color_fade_ms: fade_ms,
 
             config: config.clone(),
             keymap,
@@ -521,6 +522,10 @@ impl App {
             tab_labels,
             config_watcher,
             auto_color,
+            rgb: crate::rgb::RgbSync::new(
+                config.get("openrgb").and_then(|v| v.as_bool()).unwrap_or(true),
+                fade_ms,
+            ),
             border_type: match config.get("rounded_corners").and_then(|b| b.as_bool()) {
                 Some(false) => BorderType::Plain,
                 _ => BorderType::Rounded,
@@ -2458,7 +2463,7 @@ impl App {
     }
 
     fn grab_primary_color(&mut self, p: &str) {
-        if !self.auto_color {
+        if !self.auto_color && !self.rgb.is_active() {
             return;
         }
         let img = match image::open(p) {
@@ -2540,6 +2545,12 @@ impl App {
 
             let max_chan = prominent_color.r.max(prominent_color.g).max(prominent_color.b);
             let scale = if max_chan == 0 { 1.0 } else { 255.0 / max_chan as f32 };
+            // LEDs get the raw album color; the scaling below only aids terminal contrast
+            self.rgb.set_color(prominent_color.r, prominent_color.g, prominent_color.b);
+            if !self.auto_color {
+                return;
+            }
+
             let mut r = (prominent_color.r as f32 * scale) as u8;
             let mut g = (prominent_color.g as f32 * scale) as u8;
             let mut b = (prominent_color.b as f32 * scale) as u8;
