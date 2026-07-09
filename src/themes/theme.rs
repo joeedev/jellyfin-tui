@@ -308,7 +308,12 @@ impl Theme {
         match c {
             AutoColor::Auto => self.primary_color,
             AutoColor::Tinted(Color::Rgb(r, g, b)) => {
-                Self::lerp_color(Color::Rgb(*r, *g, *b), self.primary_color, self.tint_strength)
+                // only lerp rgb values
+                if matches!(self.primary_color, Color::Rgb(_, _, _)) {
+                    Self::lerp_color(Color::Rgb(*r, *g, *b), self.primary_color, self.tint_strength)
+                } else {
+                    Color::Rgb(*r, *g, *b)
+                }
             }
             AutoColor::Tinted(base) | AutoColor::Fixed(base) => *base,
         }

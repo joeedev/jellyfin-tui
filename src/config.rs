@@ -35,6 +35,30 @@ impl LyricsVisibility {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum LayoutMode {
+    Auto,
+    Vertical,
+    Horizontal,
+}
+impl LayoutMode {
+    pub fn from_config(val: &str) -> Self {
+        match val {
+            "vertical" => Self::Vertical,
+            "horizontal" => Self::Horizontal,
+            _ => Self::Auto,
+        }
+    }
+
+    pub fn is_vertical(self, width: u16, threshold: u16) -> bool {
+        match self {
+            Self::Auto => width < threshold,
+            Self::Vertical => true,
+            Self::Horizontal => false,
+        }
+    }
+}
+
 /// This makes sure all dirs are created before we do anything.
 /// Also makes unwraps on dirs::data_dir and config_dir safe to do. In theory ;)
 pub fn prepare_directories() -> Result<(), Box<dyn std::error::Error>> {

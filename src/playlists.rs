@@ -18,7 +18,8 @@ use ratatui_image::{Resize, StatefulImage};
 impl App {
     pub fn render_playlists(&mut self, app_container: Rect, frame: &mut Frame) {
         let show_lyrics_column = !matches!(self.lyrics_visibility, LyricsVisibility::Never);
-        let is_vertical = app_container.width < crate::library::VERTICAL_LAYOUT_THRESHOLD;
+        let is_vertical =
+            self.layout_mode.is_vertical(app_container.width, self.vertical_threshold);
         // Vertical mode forces the small-cover sizing regardless of the
         // `large_art` preference, matching the Library tab.
         let large_art = self.preferences.large_art && !is_vertical;
@@ -548,7 +549,7 @@ impl App {
                     .border_style(self.theme.resolve(&self.theme.border));
 
                 let chunk_area = block.inner(outer_area);
-                let img_area = cover_art.size_for(Resize::Scale(None), chunk_area);
+                let img_area = cover_art.size_for(Resize::Scale(None), chunk_area.as_size());
 
                 let block_total_height = img_area.height + 2;
                 let top_height = outer_area.height.saturating_sub(block_total_height);

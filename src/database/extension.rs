@@ -1,5 +1,6 @@
 use super::database::{DownloadItem, Status};
 use crate::client::LibraryView;
+use crate::helpers::LogErr;
 use crate::{
     client::{Album, Artist, Client, DiscographySong, Lyric, Playlist},
     database::database::data_updater,
@@ -180,6 +181,8 @@ impl tui::App {
                 self.reorder_lists();
             }
             Status::AlbumsUpdated => {
+                // first run after mod joins on album/artist/abums, so it can return nothing. Recompute artists here as well
+                self.original_artists = get_all_artists(&self.db.pool).await.unwrap_or_default();
                 self.original_albums = get_all_albums(&self.db.pool).await.unwrap_or_default();
                 self.reorder_lists();
             }
@@ -1261,7 +1264,8 @@ pub async fn set_last_library_update(pool: &Pool<Sqlite>) {
     )
     .bind(now)
     .execute(pool)
-    .await;
+    .await
+    .log_err("set last library update");
 }
 
 pub async fn get_random_downloaded_tracks(

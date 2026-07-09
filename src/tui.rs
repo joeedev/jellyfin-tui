@@ -23,13 +23,13 @@ use crate::database::extension::{
     get_playlists_with_tracks, insert_lyrics,
 };
 use crate::help::{build_tab_labels, render_help_modal};
-use crate::helpers::{Preferences, State, Symbols};
+use crate::helpers::{LogErr, Preferences, State, Symbols};
 use crate::keyboard::{try_load_keymap, ActiveSection, ActiveTab, Selectable};
 use crate::mpv::MpvHandle;
 use crate::popup::PopupState;
 use crate::themes::dialoguer::DialogTheme;
 use crate::themes::theme::Theme;
-use crate::{helpers, mpris, sort};
+use crate::{helpers, sort};
 
 /// A type alias for the terminal type used in this application
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -42,7 +42,7 @@ use tokio::sync::mpsc;
 use std::collections::HashMap;
 use std::io::{Stdout, Write};
 
-use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPosition};
+use media_controls::{MediaControlEvent, MediaControls};
 
 use dirs::data_dir;
 use std::path::PathBuf;
@@ -123,6 +123,8 @@ pub struct Song {
     pub musicbrainz_album_id: Option<String>,
     // pub parent_id: String,
     pub production_year: u64,
+    #[serde(default)]
+    pub index_number: u64,
     pub is_in_queue: bool,
     pub is_transcoded: bool,
     pub is_favorite: bool,
@@ -230,6 +232,8 @@ pub struct App {
 
     pub lyrics: Option<(String, Vec<Lyric>, bool)>, // ID, lyrics, time_synced
     pub lyrics_visibility: LyricsVisibility,
+    pub layout_mode: crate::config::LayoutMode,
+    pub vertical_threshold: u16,
     pub previous_song_parent_id: String,
     pub active_song_id: String,
 
@@ -254,6 +258,8 @@ pub struct App {
 
     pub searching: bool,
     pub show_help: bool,
+    pub help_search: String,
+    pub help_searching: bool,
     pub search_term: String,
     pub search_term_last: String,
 
@@ -274,6 +280,8 @@ pub struct App {
     pub search_result_artists: Vec<Artist>,
     pub search_result_albums: Vec<Album>,
     pub search_result_tracks: Vec<DiscographySong>,
+    pub search_track_page: usize,
+    pub search_track_total: u64,
 
     pub popup: PopupState,
     pub popup_search_term: String, // this is here because popup isn't persisted
@@ -294,9 +302,7 @@ pub struct App {
 
     pub song_changed: bool,
 
-    pub mpris_paused: bool,
-    pub mpris_active_song_id: String,
-    pub(crate) mpris_rx: std::sync::mpsc::Receiver<MediaControlEvent>,
+    pub(crate) mpris_rx: tokio::sync::mpsc::Receiver<MediaControlEvent>,
 
     pub window_title_enabled: bool,
     pub window_title_format: String,
@@ -358,7 +364,6 @@ impl App {
         let (sender, receiver) = channel();
         let (cmd_tx, cmd_rx) = mpsc::channel::<database::database::Command>(64);
         let (status_tx, status_rx) = mpsc::channel::<database::database::Status>(64);
-        let (mpris_tx, mpris_rx) = channel::<MediaControlEvent>();
 
         // try to go online, construct the http client
         let (client, network_quality, client_ws_rx, successfully_online) = if !offline {
@@ -420,18 +425,7 @@ impl App {
         #[cfg(not(feature = "visualizer"))]
         let mpv_handle = MpvHandle::new(&config, sender, None);
 
-        // mpris
-        let controls = match mpris::mpris() {
-            Ok(mut controls) => {
-                log::info!("Media controls initialized successfully");
-                Self::register_controls(&mut controls, mpris_tx);
-                Some(controls)
-            }
-            Err(e) => {
-                log::warn!("Failed to initialize media controls: {}", e);
-                None
-            }
-        };
+        let (controls, mpris_rx) = crate::mpris::init_media_controls().await;
 
         let preferences = Preferences::load(server_id.clone())
             .unwrap_or_else(|_| Preferences::new(server_id.clone()));
@@ -549,6 +543,15 @@ impl App {
                 .and_then(|v| v.as_str())
                 .map(LyricsVisibility::from_config)
                 .unwrap_or(LyricsVisibility::Always),
+            layout_mode: config
+                .get("layout")
+                .and_then(|v| v.as_str())
+                .map(crate::config::LayoutMode::from_config)
+                .unwrap_or(crate::config::LayoutMode::Auto),
+            vertical_threshold: config
+                .get("vertical_threshold")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(100) as u16,
             previous_song_parent_id: String::from(""),
             active_song_id: String::from(""),
 
@@ -585,6 +588,8 @@ impl App {
             show_help: false,
             search_term: String::from(""),
             search_term_last: String::from(""),
+            help_search: String::from(""),
+            help_searching: false,
 
             locally_searching: false,
 
@@ -602,6 +607,8 @@ impl App {
             search_result_artists: vec![],
             search_result_albums: vec![],
             search_result_tracks: vec![],
+            search_track_page: 0,
+            search_track_total: 0,
 
             popup: PopupState::default(),
             popup_search_term: String::from(""),
@@ -612,8 +619,6 @@ impl App {
             discord,
             downloads_dir: data_dir().unwrap().join("jellyfin-tui").join("downloads"),
 
-            mpris_paused: true,
-            mpris_active_song_id: String::from(""),
             mpris_rx,
 
             window_title_enabled,
@@ -1186,7 +1191,7 @@ impl App {
 
     pub async fn run(&mut self) -> std::result::Result<(), Box<dyn std::error::Error>> {
         // get playback state from the mpv thread
-        let _ = self.receive_mpv_state().await;
+        let _ = self.receive_mpv_state().await.log_dbg("receive mpv state");
         self.cleanup_played_tracks().await;
 
         let current_song = self
@@ -1205,6 +1210,12 @@ impl App {
         self.handle_database_events().await?;
 
         self.process_terminal_events().await?;
+
+        // Pump the platform run-loop (macOS: delivers MPRemoteCommandCenter events;
+        // no-op on Linux/stub backends).
+        if let Some(ref c) = self.controls {
+            c.tick();
+        }
 
         self.handle_mpris_events().await;
 
@@ -1277,6 +1288,14 @@ impl App {
                     .and_then(|v| v.as_str())
                     .map(LyricsVisibility::from_config)
                     .unwrap_or(LyricsVisibility::Always);
+                self.layout_mode = new_config
+                    .get("layout")
+                    .and_then(|v| v.as_str())
+                    .map(crate::config::LayoutMode::from_config)
+                    .unwrap_or(crate::config::LayoutMode::Auto);
+                self.vertical_threshold =
+                    new_config.get("vertical_threshold").and_then(|v| v.as_u64()).unwrap_or(100)
+                        as u16;
                 self.symbols = new_config
                     .get("symbols")
                     .and_then(|v| serde_yaml::from_value(v.clone()).ok())
@@ -1362,55 +1381,6 @@ impl App {
         // casts to uint = position in SECONDS => update mpris position once every second
         if !self.paused && old_position as u64 != new_position as u64 {
             self.update_mpris_position(new_position);
-        }
-    }
-
-    fn update_mpris_metadata(&mut self) {
-        let playback = &self.state.current_playback_state;
-        let song_changed =
-            self.active_song_id != self.mpris_active_song_id && playback.duration > 0.0;
-
-        let controls = match self.controls.as_mut() {
-            Some(c) => c,
-            None => return,
-        };
-
-        if song_changed {
-            self.mpris_active_song_id = self.active_song_id.clone();
-
-            let cover_url_string = format!("file://{}", self.cover_art_path);
-
-            if let Some(song) = self.state.queue.get(playback.current_index) {
-                let metadata = MediaMetadata {
-                    title: Some(song.name.as_str()),
-                    artist: Some(song.artist.as_str()),
-                    album: Some(song.album.as_str()),
-                    cover_url: Some(cover_url_string.as_str()),
-                    duration: Some(Duration::from_secs(playback.duration as u64)),
-                };
-                // log::info!("Setting metadata: {} - {} ({})", song.artist, song.name, song.album);
-                let _ = controls.set_metadata(metadata);
-
-                // Set initial playback state when song changes
-                let position =
-                    Duration::try_from_secs_f64(playback.position).unwrap_or(Duration::ZERO);
-                let progress = Some(MediaPosition(position));
-                let playback_state = if self.paused {
-                    souvlaki::MediaPlayback::Paused { progress }
-                } else {
-                    souvlaki::MediaPlayback::Playing { progress }
-                };
-                // log::info!("Setting playback state: paused={}", self.paused);
-                let _ = controls.set_playback(playback_state);
-                self.mpris_paused = self.paused;
-            } else {
-                let _ = controls.set_metadata(MediaMetadata::default());
-            }
-        }
-
-        if self.paused != self.mpris_paused {
-            self.mpris_paused = self.paused;
-            self.update_mpris_position(playback.position);
         }
     }
 
@@ -1511,7 +1481,8 @@ impl App {
                                 .collect(),
                         },
                     }))
-                    .await;
+                    .await
+                    .log_dbg("report progress");
             }
         }
 
@@ -1569,7 +1540,8 @@ impl App {
                         id: Some(self.scrobble_this.0.clone()),
                         position_ticks: Some(self.scrobble_this.1),
                     }))
-                    .await;
+                    .await
+                    .log_dbg("scrobble stop");
                 self.scrobble_this = (String::new(), 0);
             }
             let _ = self
@@ -1611,7 +1583,8 @@ impl App {
                             .collect(),
                     },
                 }))
-                .await;
+                .await
+                .log_dbg("report playing");
         }
 
         Ok(())
@@ -1640,22 +1613,23 @@ impl App {
             .db
             .cmd_tx
             .send(Command::Update(UpdateCommand::SongPlayed { track_id: song.id.clone() }))
-            .await;
+            .await
+            .log_dbg("song played");
 
         if let Some((discord_tx, .., art_mode, status_display_type)) = &mut self.discord {
             let playback = &self.state.current_playback_state;
-            if let Some(client) = &self.client {
-                let _ = discord_tx
-                    .send(crate::discord::DiscordCommand::Playing {
-                        track: song.clone(),
-                        percentage_played: playback.position / playback.duration,
-                        server_url: client.base_url.clone(),
-                        paused: self.paused,
-                        art: *art_mode,
-                        status_display_type: status_display_type.clone(),
-                    })
-                    .await;
-            }
+            let server_url = self.client.as_ref().map(|c| c.base_url.clone());
+            let _ = discord_tx
+                .send(crate::discord::DiscordCommand::Playing {
+                    track: song.clone(),
+                    percentage_played: playback.position / playback.duration,
+                    server_url,
+                    paused: self.paused,
+                    art: *art_mode,
+                    status_display_type: status_display_type.clone(),
+                })
+                .await
+                .log_dbg("discord song change");
         }
 
         self.update_cover_art(song, false, false).await;
@@ -1671,7 +1645,7 @@ impl App {
             self.state.active_section = fallback;
         }
 
-        let _ = self.set_window_title(Some(song));
+        let _ = self.set_window_title(Some(song)).log_dbg("set window title");
 
         if self.preferences.repeat == Repeat::Radio
             && self.state.queue.last().is_some_and(|t| t.id == self.active_song_id)
@@ -1696,24 +1670,26 @@ impl App {
             *last_discord_update = Instant::now();
 
             let playback = &self.state.current_playback_state;
-            if let Some(client) = &self.client {
-                match self.state.queue.get(self.state.current_playback_state.current_index).cloned()
-                {
-                    Some(song) => {
-                        let _ = discord_tx
-                            .send(crate::discord::DiscordCommand::Playing {
-                                track: song.clone(),
-                                percentage_played: playback.position / playback.duration,
-                                server_url: client.base_url.clone(),
-                                paused: self.paused,
-                                art: *art_mode,
-                                status_display_type: status_display_type.clone(),
-                            })
-                            .await;
-                    }
-                    None => {
-                        let _ = discord_tx.send(crate::discord::DiscordCommand::Stopped).await;
-                    }
+            let server_url = self.client.as_ref().map(|c| c.base_url.clone());
+            match self.state.queue.get(self.state.current_playback_state.current_index).cloned() {
+                Some(song) => {
+                    let _ = discord_tx
+                        .send(crate::discord::DiscordCommand::Playing {
+                            track: song.clone(),
+                            percentage_played: playback.position / playback.duration,
+                            server_url,
+                            paused: self.paused,
+                            art: *art_mode,
+                            status_display_type: status_display_type.clone(),
+                        })
+                        .await
+                        .log_dbg("discord update");
+                }
+                None => {
+                    let _ = discord_tx
+                        .send(crate::discord::DiscordCommand::Stopped)
+                        .await
+                        .log_dbg("discord stopped");
                 }
             }
         }
@@ -1776,9 +1752,7 @@ impl App {
             return;
         }
         self.last_state_saved = Instant::now();
-        if let Err(e) = self.state.save(&self.server_id, self.client.is_none()) {
-            log::error!(" ! Failed to autosave state: {}", e);
-        }
+        let _ = self.state.save(&self.server_id, self.client.is_none()).log_err("autosave state");
     }
 
     async fn set_lyrics(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -1793,7 +1767,9 @@ impl App {
         };
 
         let lyrics = if let Some(lyrics) = maybe_lyrics {
-            let _ = insert_lyrics(&self.db.pool, &self.active_song_id, &lyrics).await;
+            let _ = insert_lyrics(&self.db.pool, &self.active_song_id, &lyrics)
+                .await
+                .log_warn("insert lyrics");
             lyrics
         } else {
             get_lyrics(&self.db.pool, &self.active_song_id).await?
@@ -1838,8 +1814,14 @@ impl App {
                             }
                             self.grab_primary_color(&p);
                         } else {
-                            self.theme.primary_color = self.theme.resolve(&self.theme.accent);
+                            let fallback = self.theme.resolve(&self.theme.accent);
+                            self.theme.set_primary_color(fallback);
+                            Self::write_accent_color_file(fallback);
                         }
+                    } else {
+                        let fallback = self.theme.resolve(&self.theme.accent);
+                        self.theme.set_primary_color(fallback);
+                        Self::write_accent_color_file(fallback);
                     }
                 }
                 Err(_) => {
@@ -1847,6 +1829,9 @@ impl App {
                         self.cover_art = None;
                         self.cover_art_fullscreen = None;
                         self.cover_art_path.clear();
+                        let fallback = self.theme.resolve(&self.theme.accent);
+                        self.theme.set_primary_color(fallback);
+                        Self::write_accent_color_file(fallback);
                     }
                 }
             }
@@ -2019,6 +2004,8 @@ impl App {
                 &mut self.state.help_scroll_state,
                 self.border_type,
                 &self.theme,
+                &self.help_search,
+                self.help_searching,
             );
         }
     }
@@ -2047,7 +2034,7 @@ impl App {
             ])
             .split(area);
 
-        let is_vertical = area.width < crate::library::VERTICAL_LAYOUT_THRESHOLD;
+        let is_vertical = self.layout_mode.is_vertical(area.width, self.vertical_threshold);
         let labels: Vec<String> = if is_vertical {
             ["Lib", "Alb", "Plst", "Srch"].iter().map(|s| s.to_string()).collect()
         } else {
@@ -2219,7 +2206,8 @@ impl App {
                         .send(Command::Update(UpdateCommand::Discography {
                             artist_id: id.to_string(),
                         }))
-                        .await;
+                        .await
+                        .log_dbg("queue discography update");
                 }
             }
             // if we get here, it means the DB call returned either
@@ -2235,12 +2223,17 @@ impl App {
                             .send(Command::Update(UpdateCommand::Discography {
                                 artist_id: id.to_string(),
                             }))
-                            .await;
+                            .await
+                            .log_dbg("queue discography update");
                     }
                 } else {
                     // a catch-all for db errors
-                    let _ =
-                        self.db.cmd_tx.send(Command::Update(UpdateCommand::OfflineRepair)).await;
+                    let _ = self
+                        .db
+                        .cmd_tx
+                        .send(Command::Update(UpdateCommand::OfflineRepair))
+                        .await
+                        .log_dbg("offline repair");
                 }
             }
         }
@@ -2273,8 +2266,12 @@ impl App {
                         self.album_tracks = tracks;
                     }
                 } else {
-                    let _ =
-                        self.db.cmd_tx.send(Command::Update(UpdateCommand::OfflineRepair)).await;
+                    let _ = self
+                        .db
+                        .cmd_tx
+                        .send(Command::Update(UpdateCommand::OfflineRepair))
+                        .await
+                        .log_dbg("offline repair");
                 }
             }
         }
@@ -2292,7 +2289,8 @@ impl App {
                 .db
                 .cmd_tx
                 .send(Command::Update(UpdateCommand::Discography { artist_id: artist.id.clone() }))
-                .await;
+                .await
+                .log_dbg("queue discography update");
         }
     }
 
@@ -2323,8 +2321,12 @@ impl App {
                         }
                     }
                 } else {
-                    let _ =
-                        self.db.cmd_tx.send(Command::Update(UpdateCommand::OfflineRepair)).await;
+                    let _ = self
+                        .db
+                        .cmd_tx
+                        .send(Command::Update(UpdateCommand::OfflineRepair))
+                        .await
+                        .log_dbg("offline repair");
                 }
             }
         }
@@ -2342,7 +2344,8 @@ impl App {
             .db
             .cmd_tx
             .send(Command::Update(UpdateCommand::Playlist { playlist_id: playlist.id.clone() }))
-            .await;
+            .await
+            .log_dbg("queue playlist update");
     }
     async fn get_cover_art(
         &mut self,
@@ -2377,7 +2380,8 @@ impl App {
                             return Some(file_name);
                         } else {
                             log::warn!("Cached cover art for {} was invalid, removing…", id);
-                            let _ = std::fs::remove_file(&path);
+                            let _ =
+                                std::fs::remove_file(&path).log_warn("remove invalid cover art");
                         }
                     }
                 }
@@ -2401,7 +2405,8 @@ impl App {
                         .send(Command::Download(DownloadCommand::CoverArt {
                             item_id: preferred_id,
                         }))
-                        .await;
+                        .await
+                        .log_dbg("queue cover art download");
                 }
                 return Ok(file_name);
             }
@@ -2413,7 +2418,8 @@ impl App {
                 .db
                 .cmd_tx
                 .send(Command::Download(DownloadCommand::CoverArt { item_id: preferred_id }))
-                .await;
+                .await
+                .log_dbg("queue cover art download");
         }
 
         Err(Box::new(std::io::Error::new(std::io::ErrorKind::NotFound, "Artwork not found")))
@@ -2422,6 +2428,33 @@ impl App {
     pub fn get_image_buffer(img: image::DynamicImage) -> (Vec<u8>, color_thief::ColorFormat) {
         let rgba = img.to_rgba8();
         (rgba.to_vec(), color_thief::ColorFormat::Rgba)
+    }
+
+    fn write_accent_color_file(color: Color) {
+        let Color::Rgb(r, g, b) = color else {
+            return;
+        };
+
+        let Some(data_dir) = data_dir() else {
+            log::debug!("Could not write accent color file: data dir not available");
+            return;
+        };
+
+        let path = data_dir.join("jellyfin-tui").join("accent_color");
+        if let Some(parent) = path.parent() {
+            if let Err(err) = std::fs::create_dir_all(parent) {
+                log::debug!(
+                    "Could not write accent color file (create dir {}): {}",
+                    parent.display(),
+                    err
+                );
+                return;
+            }
+        }
+
+        if let Err(err) = std::fs::write(&path, format!("#{:02x}{:02x}{:02x}", r, g, b)) {
+            log::debug!("Could not write accent color file ({}): {}", path.display(), err);
+        }
     }
 
     fn grab_primary_color(&mut self, p: &str) {
@@ -2531,7 +2564,13 @@ impl App {
                 b = b.saturating_add(30);
             }
 
-            self.theme.set_primary_color(Color::Rgb(r, g, b));
+            let color = Color::Rgb(r, g, b);
+            self.theme.set_primary_color(color);
+            Self::write_accent_color_file(color);
+        } else {
+            let fallback = self.theme.resolve(&self.theme.accent);
+            self.theme.set_primary_color(fallback);
+            Self::write_accent_color_file(fallback);
         }
     }
 
@@ -2540,9 +2579,7 @@ impl App {
         if !persist {
             return;
         }
-        if let Err(e) = self.state.save(&self.server_id, self.client.is_none()) {
-            log::error!("[XX] Failed to save state This is most likely a bug: {:?}", e);
-        }
+        let _ = self.state.save(&self.server_id, self.client.is_none()).log_err("save state");
     }
 
     pub async fn load_state(&mut self) -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -2584,7 +2621,12 @@ impl App {
             }
         });
         if needs_repair {
-            let _ = self.db.cmd_tx.send(Command::Update(UpdateCommand::OfflineRepair)).await;
+            let _ = self
+                .db
+                .cmd_tx
+                .send(Command::Update(UpdateCommand::OfflineRepair))
+                .await
+                .log_dbg("offline repair");
         }
 
         self.reorder_lists();
@@ -2606,14 +2648,16 @@ impl App {
                 .send(Command::Update(UpdateCommand::SongPlayed {
                     track_id: current_song.id.clone(),
                 }))
-                .await;
+                .await
+                .log_dbg("song played");
             let _ = self
                 .db
                 .cmd_tx
                 .send(Command::Update(UpdateCommand::SongPlayed {
                     track_id: current_song.id.clone(),
                 }))
-                .await;
+                .await
+                .log_dbg("song played");
             self.update_cover_art(&current_song, false, false).await;
         }
         // load lyrics
@@ -2642,12 +2686,11 @@ impl App {
         self.playlist_track_select_by_index(playlist_track_index);
         self.album_track_select_by_index(album_track_index);
 
-        #[cfg(target_os = "linux")]
-        {
-            if let Some(ref mut controls) = self.controls {
-                let _ =
-                    controls.set_volume(self.state.current_playback_state.volume as f64 / 100.0);
-            }
+        if let Some(ref controls) = self.controls {
+            controls.update(
+                media_controls::NowPlaying::new()
+                    .volume(self.state.current_playback_state.volume as f64 / 100.0),
+            );
         }
 
         // handle expired session token in urls
@@ -2657,9 +2700,7 @@ impl App {
             }
         }
 
-        if let Err(e) = self.start_new_queue().await {
-            log::error!("Failed to initialize mpv queue at launch: {}", e);
-        }
+        let _ = self.start_new_queue().await.log_err("initialize mpv queue");
 
         self.mpv_handle.play_index(self.state.current_playback_state.current_index).await;
         self.mpv_handle.set_volume(self.state.current_playback_state.volume).await;
@@ -2668,7 +2709,7 @@ impl App {
         self.pause().await;
 
         if let Some(song) = self.state.queue.get(self.state.current_playback_state.current_index) {
-            let _ = self.set_window_title(Some(song));
+            let _ = self.set_window_title(Some(song)).log_dbg("set window title");
 
             if self.state.current_playback_state.position > 0.1 {
                 self.hard_seek_target = Some(self.state.current_playback_state.position);
@@ -2685,18 +2726,22 @@ impl App {
 
     pub async fn exit(&mut self) {
         self.save_state();
+        if let Some(ref controls) = self.controls {
+            controls.update(
+                media_controls::NowPlaying::new().status(media_controls::PlaybackStatus::Stopped),
+            );
+        }
         if let Some((discord_tx, ..)) = &self.discord {
-            let _ = discord_tx.send(crate::discord::DiscordCommand::Stopped).await;
+            let _ = discord_tx
+                .send(crate::discord::DiscordCommand::Stopped)
+                .await
+                .log_dbg("discord stopped");
         }
-        if let Err(e) = self.preferences.save() {
-            log::error!("Failed to save preferences: {:?}", e);
-        }
+        let _ = self.preferences.save().log_err("save preferences");
         if let Some(client) = self.client.as_mut() {
-            if let Err(e) = client.stopped(None, None).await {
-                log::error!("Failed to send stopped event: {:?}", e);
-            }
+            let _ = client.stopped(None, None).await.log_err("send stopped event");
         }
-        let _ = self.set_window_title(None);
+        let _ = self.set_window_title(None).log_dbg("clear window title");
         self.exit = true;
     }
 }

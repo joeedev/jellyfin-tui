@@ -151,7 +151,7 @@ impl App {
             height: area.height.saturating_sub(v_pad),
         };
 
-        let img_size = cover_art.size_for(Resize::Scale(None), art_area);
+        let img_size = cover_art.size_for(Resize::Scale(None), art_area.into());
         let art_y = (area.y + (area.height.saturating_sub(img_size.height)) / 2).max(area.y + 1);
         Some(Rect {
             x: area.x + (area.width.saturating_sub(img_size.width)) / 2 + 1,

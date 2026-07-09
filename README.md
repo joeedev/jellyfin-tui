@@ -8,15 +8,17 @@ its goal is to offer a self-hosted, terminal music player with all the modern fe
 - stream your music from Jellyfin
 - sixel **cover image**, courtesy of [ratatui-image](https://github.com/benjajaja/ratatui-image)
 - lyrics with autoscroll (Jellyfin > 10.9)
-- custom themes, color extraction from album art + smooth interpolated transitions
+- custom themes, color extraction from album art + smooth interpolated transitions + tinted variants
 - spotify-like double queue with order control, etc.
 - full offline mode with metadata caching, track downloads, background updates and slow network fallback
-- last.fm scrobbling, you need [jellyfin-plugin-lastfm](https://github.com/jesseward/jellyfin-plugin-lastfm)
+- last.fm scrobbling, you need [jellyfin-plugin-lastfm](https://github.com/danielfariati/jellyfin-plugin-lastfm)
 - multi-library support
 - vim-style keybindings
 - MPRIS integration
-- playlists (play/create/edit)
+- playlists (play/create/edit/reorder)
 - transcoding, shuffle, repeat modes, the works
+- remote control from the Jellyfin web UI or any other Jellyfin client
+- vertical layout for narrow terminals, resize panes with `Ctrl+Up/Down`
 - works over ssh (and tmux)
 - sleep timer
 - fast and just kind of nifty really
@@ -24,7 +26,6 @@ its goal is to offer a self-hosted, terminal music player with all the modern fe
 ### Planned features
 
 - other media types (movies, tv shows)
-- jellyfin-wide remote control and much more
 - if there is a feature you'd like to see, please open an issue :)
 
 ## Screenshots
@@ -32,6 +33,12 @@ its goal is to offer a self-hosted, terminal music player with all the modern fe
 ![image](.github/screen.gif)
 
 ## Installation
+
+### Pre-built binaries
+
+Pre-built binaries for Linux and macOS are available on
+the [releases page](https://github.com/dhonus/jellyfin-tui/releases).
+Download the binary for your platform, make it executable, and place it somewhere on your `PATH`.
 
 ### Arch Linux
 
@@ -130,11 +137,16 @@ persist: true
 auto_color: true
 # Time in milliseconds to fade between colors when the track changes
 auto_color_fade_ms: 400
+
 # Always show the lyrics pane, even if no lyrics are available
 lyrics: 'always' # options: 'always', 'never', 'auto'
+
+# Layout mode — 'auto' switches to vertical below vertical_threshold columns
+layout: auto # options: 'auto', 'vertical', 'horizontal'
+vertical_threshold: 100 # columns; only used when layout is 'auto'
+
 # Swap the play and pause icons
 swap_play_pause: false
-
 # Custom symbols — useful for Nerd Font users. Each character of `spinner` is one animation frame.
 symbols:
   favorite: "♥"
@@ -180,6 +192,9 @@ mpv:
   af: lavfi=[loudnorm=I=-23:TP=-1]
   no-config: true
   log-file: /tmp/mpv.log
+  # Load custom Lua scripts. Any script in ~/.local/share/jellyfin-tui/mpv-scripts/ is also loaded automatically.
+  scripts:
+    - /path/to/script.lua
 ```
 
 ## Theming
@@ -195,12 +210,16 @@ You can also define your own **custom themes** in the config by selecting a **ba
 you want.
 Custom themes are hot-reloaded when you save the config file.
 
+#### `accent_color` file
+The `accent` color gets written to a file each time it changes. It is located in the DATA_DIR. (for example `~/.local/share/jellyfin-tui/accent_color` on linux) and contains the #HEX rgb color. Use it with pywal or similar tools.
+
 ### Color formats
 
 * `"#rrggbb"` (hex)
 * `"red"`,`"white"`,`"gray"` (named)
 * `"auto"` → uses the extracted accent from album art
-* `"tinted"` → keeps the inherited base color but blends it slightly towards the album accent (strength controlled by `tint_strength`)
+* `"tinted"` → keeps the inherited base color but blends it slightly towards the album accent (strength controlled by
+  `tint_strength`)
 * `"tinted #rrggbb"` / `"tinted:#rrggbb"` → same as above but with an explicit base color
 * `"none"` → disables optional backgrounds (`background`,`album_header_background` only)
 
@@ -210,29 +229,29 @@ Custom themes are hot-reloaded when you save the config file.
 <summary>Full list of keys</summary>
 <br>
 
-| Key                            | Description                                                                                         |
-|--------------------------------|-----------------------------------------------------------------------------------------------------|
-| `background`                   | Main background color. Optional — `none` uses terminal bg.                                          |
-| `foreground`                   | Primary text color.                                                                                 |
-| `foreground_secondary`         | Secondary text (artists in player, ...).                                                            |
-| `foreground_dim`               | Dimmed text for less important UI elements.                                                         |
-| `foreground_disabled`          | Disabled or unavailable UI elements, disliked tracks.                                               |
-| `section_title`                | Titles of sections like *Albums*, *Artists*, etc.                                                   |
-| `accent`                       | Fallback color for `"auto"`, applied when album art isn't available or if `auto_color` is disabled. |
-| `border`                       | Normal border color.                                                                                |
-| `border_focused`               | Border color when a widget is focused. `"auto"` uses primary (album) color.                         |
-| `selected_active_background`   | Background of the currently selected row the the active section.                                    |
-| `selected_active_foreground`   | Text color of the selected row in the active section.                                               |
-| `selected_inactive_background` | Background of selected rows in inactive sections.                                                   |
-| `selected_inactive_foreground` | Foreground of selected rows in inactive sections.                                                   |
-| `scrollbar_thumb`              | Scrollbar handle color.                                                                             |
-| `scrollbar_track`              | Scrollbar track color.                                                                              |
-| `progress_fill`                | Played/filled portion of progress bars.                                                             |
-| `progress_track`               | Unfilled portion of progress bars.                                                                  |
-| `tab_active_foreground`        | Text color of the active tab.                                                                       |
-| `tab_inactive_foreground`      | Text color of inactive tabs.                                                                        |
-| `album_header_background`      | Background for album/artist header rows (optional).                                                 |
-| `album_header_foreground`      | Foreground for album/artist header rows.                                                            |
+| Key                            | Description                                                                                                                           |
+|--------------------------------|---------------------------------------------------------------------------------------------------------------------------------------|
+| `background`                   | Main background color. Optional — `none` uses terminal bg.                                                                            |
+| `foreground`                   | Primary text color.                                                                                                                   |
+| `foreground_secondary`         | Secondary text (artists in player, ...).                                                                                              |
+| `foreground_dim`               | Dimmed text for less important UI elements.                                                                                           |
+| `foreground_disabled`          | Disabled or unavailable UI elements, disliked tracks.                                                                                 |
+| `section_title`                | Titles of sections like *Albums*, *Artists*, etc.                                                                                     |
+| `accent`                       | Fallback color for `"auto"`, applied when album art isn't available or if `auto_color` is disabled.                                   |
+| `border`                       | Normal border color.                                                                                                                  |
+| `border_focused`               | Border color when a widget is focused. `"auto"` uses primary (album) color.                                                           |
+| `selected_active_background`   | Background of the currently selected row the the active section.                                                                      |
+| `selected_active_foreground`   | Text color of the selected row in the active section.                                                                                 |
+| `selected_inactive_background` | Background of selected rows in inactive sections.                                                                                     |
+| `selected_inactive_foreground` | Foreground of selected rows in inactive sections.                                                                                     |
+| `scrollbar_thumb`              | Scrollbar handle color.                                                                                                               |
+| `scrollbar_track`              | Scrollbar track color.                                                                                                                |
+| `progress_fill`                | Played/filled portion of progress bars.                                                                                               |
+| `progress_track`               | Unfilled portion of progress bars.                                                                                                    |
+| `tab_active_foreground`        | Text color of the active tab.                                                                                                         |
+| `tab_inactive_foreground`      | Text color of inactive tabs.                                                                                                          |
+| `album_header_background`      | Background for album/artist header rows (optional).                                                                                   |
+| `album_header_foreground`      | Foreground for album/artist header rows.                                                                                              |
 | `tint_strength`                | `0.0`–`1.0` float. Controls how much `"tinted"` colors shift towards the album accent. Stock `0.0`, default tinted themes use `0.06`. |
 
 </details>
@@ -375,6 +394,9 @@ keymap:
   # seek 10 seconds forward or backward
   ctrl-h: !Seek -10
   ctrl-l: !Seek 10
+  # adjust volume by a delta (positive or negative)
+  ctrl-up: !Volume 5
+  ctrl-down: !Volume -5
   # run a shell command, in this case detaching from tmux
   q: !Shell "tmux detach"
 ```
@@ -442,22 +464,25 @@ The **Global Popup** includes several toggleable preferences:
 | Stop downloading and abort queued                 | Immediately stops all ongoing downloads and clears the download queue. Useful if you need to quickly free up bandwidth or system resources, or if you accidentally initiated a large number of downloads.     |
 | Reset section widths                              | Resets the widths of all sections to their default values.                                                                                                                                                    |
 
-Regular popups include options relevant to the current context. For example, in the discography view, you can choose the
-order in which albums are displayed:
+Regular popups include options relevant to the current context — album sort order, Instant Mix, track disliking, copying
+a track or Last.fm URL, and more. For example, in the discography view:
 
 ![image](.github/popup.png)
 
 ## Queue
 
 Jellyfin-tui has a double queue similar to Spotify. You can add songs to the queue by pressing `e` or `shift + enter`.
+Press `Alt+Enter` (`PlayAll`) to play the entire discography, album, or playlist at once — this respects shuffle mode.
 Learn more about what you can do with the queue by pressing `?` and reading through the key bindings.
 
 ![image](.github/queue.png)
 
 ## Global Shuffle
 
-You can shuffle from your entire library with the Global Shuffle feature. Open it with `Ctrl+S`, select from the options
-it offers, and hit `Play` to start playing.
+You can shuffle from your entire library with the Global Shuffle feature. Open it with `Shift+S`, select from the
+options
+it offers, and hit `Play` to start playing. You can filter by year range and downloaded-only tracks, and it works in
+offline mode.
 
 ![.github/shuffle.png](.github/shuffle.png)
 
@@ -480,39 +505,45 @@ Press **`R`** to cycle repeat modes.
 
 When radio is active, press **`Shift+R`** to cycle radio modes.
 
+## Remote Control
+
+Jellyfin-tui registers itself as a Jellyfin session and can be controlled from the Jellyfin web UI or any other client
+that supports remote control (play/pause, stop, next/prev, seek, volume, play-queue).
+
+![remote-controls](.github/remote_controls.gif)
+  
 ## MPRIS
 
-Jellyfin-tui registers itself as an MPRIS client, so you can control it with any MPRIS controller. For example,
-`playerctl`.
+Jellyfin-tui integrates with the OS media controls — MPRIS on Linux (controllable via `playerctl` etc.) and
+MPRemoteCommandCenter on macOS (media keys, Now Playing widget).
 
 ## Search
 
-In the Artists and Tracks lists you can search by pressing `/` and typing your query. The search is case-insensitive and
-will filter the results as you type. Pressing `ESC` will clear the search and keep the current item selected.
+In the Artists and Tracks lists you can search by pressing `/` and typing your query. The search is case-insensitive,
+strips diacritics (so `boa` finds `bôa`), and will filter the results as you type. Pressing `ESC` will clear the search
+and keep the current item selected.
 
 You can search globally by switching to the Search tab. The search is case-insensitive and will search for artists,
-albums and tracks. It will pull **everything** without pagination, so it may take a while to load if you have a large
-library. This was done because jellyfin won't allow me to search for tracks without an artist or album assigned, which
-this client doesn't support.
+albums and tracks. Tracks are paginated. 
 
-![image](.github/search.png)
+![search](.github/search.png)
 
 ## Downloading media / offline mode
 
-Downloading music is very simple, just **press `d` on a track** or album. Use **`shift+d`** do delete the download. More
-download options can be found in popups.
+Press **`d`** on a track or album to download it. **`Shift+d`** removes the download. Additional options are in the
+context popup.
 
-You can launch jellyfin-tui in offline mode by passing the `--offline` flag. This will disable all network access and
-only play downloaded tracks.
+![downloading](<.github/downloading.png>)
 
-A local copy of commonly used data is stored in a local database. This speeds up load times and allows you to use the
-program fully offline. Also, playing a downloaded track will play the local copy instead of streaming it, saving
-bandwidth.
-> Your library is updated **in the background** every 10 minutes. You will be notified if anything changes. Track
-> metadata updates whenever you open a discography/album/playlist view in-place. You can also force an update in the
-> global popup menu. Jellyfin is the parent, if you delete music on the server, jellyfin-tui will also delete it
-> including
-> downloaded files.
+jellyfin-tui keeps a local cache of library metadata. Pass **`--offline`** at launch to run fully offline — only
+downloaded tracks will be available. Playing a downloaded track always uses the local file instead of streaming.
+
+Your library syncs in the background every 10 minutes — artists, albums and playlists refresh automatically. Opening a
+discography, album, or playlist loads from the local cache immediately and quietly fetches any changes from the server.
+You can also trigger a sync manually from the global popup.
+
+Jellyfin is the source of truth — deleting music on the server will also remove it from jellyfin-tui, including any
+downloaded files.
 
 --- 
 
@@ -527,7 +558,7 @@ Due to the nature of the project and jellyfin itself, there are some limitations
   they need to contain timestamps. I recommend using
   the [LrcLib Jellyfin plugin](https://github.com/jellyfin/jellyfin-plugin-lrclib) and running `Download missing lyrics`
   directly **within jellyfin-tui** (Global Popup > Run Jellyfin task > Library: Download missing lyrics), or
-  alternatively the desktop application [LRCGET](https://github.com/tranxuanthang/lrcget), both by by tranxuanthang. If
+  alternatively the desktop application [LRCGET](https://github.com/tranxuanthang/lrcget), both by tranxuanthang. If
   you value their work, consider donating to keep this amazing free service running.
 
 ### Supported terminals
