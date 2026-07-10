@@ -137,8 +137,11 @@ persist: true
 auto_color: true
 # Time in milliseconds to fade between colors when the track changes
 auto_color_fade_ms: 400
-# Sync RGB lighting to the album color if OpenRGB is installed (restored on exit)
+# Sync RGB lighting to the album color if OpenRGB is installed
+# (off while paused, restored on exit)
 openrgb: true
+# Blend the album's two main colors across each device (false => one solid color)
+openrgb_two_colors: true
 # Always show the lyrics pane, even if no lyrics are available
 lyrics: 'always' # options: 'always', 'never', 'auto'
 

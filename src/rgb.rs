@@ -1,5 +1,5 @@
 /*
-Synchronizes RGB lighting with the album's primary color via OpenRGB.
+Synchronizes RGB lighting with the album's primary colors via OpenRGB.
 
 When an OpenRGB SDK server is running we keep a persistent connection to it,
 which is fast enough to fade smoothly between colors like the UI does. Without
@@ -7,14 +7,20 @@ a server we fall back to one-shot openrgb CLI calls (~1s each, so no fade).
 On startup the current lighting is snapshotted into a profile and restored on
 exit; both go through the CLI, which handles profiles reliably.
 
+Each device shows a gradient between the album's two most prominent colors
+(which collapse to a solid color when they match, or when openrgb_two_colors
+is off). While playback is paused the LEDs fade to fully off and the song's
+colors are remembered for resume. The CLI fallback can only set one color for
+everything, so it uses the primary.
+
 The SDK writes are hand-encoded onto a raw socket: the openrgb crate's write
 encodings are subtly off-spec (internal size fields), and OpenRGB 1.0 servers
 validate packets and silently drop offending clients. The crate's read path is
 correct, so it is still used to discover the controller layout.
 
 Commands are processed sequentially on a dedicated thread so the snapshot is
-always taken before the first color is applied, and a color arriving mid-fade
-retargets the fade from wherever it currently is.
+always taken before the first color is applied, and a command arriving
+mid-fade retargets the fade from wherever it currently is.
 */
 
 use std::io::Write;
@@ -41,39 +47,86 @@ const PACKET_SET_CLIENT_NAME: u32 = 50;
 const PACKET_UPDATE_LEDS: u32 = 1050;
 const PACKET_SET_CUSTOM_MODE: u32 = 1100;
 
+type Rgb = (f32, f32, f32);
+type Rgb8 = (u8, u8, u8);
+/// The colors at the two ends of each device's LED gradient.
+type Pair = (Rgb, Rgb);
+
+const OFF: Pair = ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0));
+
 enum RgbCommand {
-    Color(u8, u8, u8),
+    Color(Rgb8, Rgb8),
+    Paused(bool),
     Restore,
 }
 
 pub struct RgbSync {
     tx: Option<Sender<RgbCommand>>,
     handle: Option<JoinHandle<()>>,
-    last_color: Option<(u8, u8, u8)>,
+    last_color: Option<(Rgb8, Rgb8)>,
+    paused: bool,
+    sent_paused: bool,
 }
 
 impl RgbSync {
     pub fn new(enabled: bool, fade_ms: u64) -> Self {
         if !enabled || !openrgb_available() {
-            return Self { tx: None, handle: None, last_color: None };
+            return Self {
+                tx: None,
+                handle: None,
+                last_color: None,
+                paused: false,
+                sent_paused: false,
+            };
         }
         let (tx, rx) = std::sync::mpsc::channel::<RgbCommand>();
         let handle = std::thread::spawn(move || t_openrgb(rx, fade_ms));
         log::info!("OpenRGB found, lighting will follow the album color");
-        Self { tx: Some(tx), handle: Some(handle), last_color: None }
+        Self {
+            tx: Some(tx),
+            handle: Some(handle),
+            last_color: None,
+            paused: false,
+            sent_paused: false,
+        }
     }
 
     pub fn is_active(&self) -> bool {
         self.tx.is_some()
     }
 
-    pub fn set_color(&mut self, r: u8, g: u8, b: u8) {
-        if self.last_color == Some((r, g, b)) {
+    /// Each device fades between primary and secondary along its LEDs; pass
+    /// the same color twice for a solid fill.
+    pub fn set_color(&mut self, primary: Rgb8, secondary: Rgb8) {
+        if self.last_color == Some((primary, secondary)) {
+            return;
+        }
+        let Some(tx) = &self.tx else { return };
+        // the player can start paused (e.g. a restored queue); tell the worker
+        // before the first color so the LEDs never flash on
+        if self.last_color.is_none()
+            && self.paused
+            && !self.sent_paused
+            && tx.send(RgbCommand::Paused(true)).is_ok()
+        {
+            self.sent_paused = true;
+        }
+        if tx.send(RgbCommand::Color(primary, secondary)).is_ok() {
+            self.last_color = Some((primary, secondary));
+        }
+    }
+
+    /// Turns the LEDs off while paused and back on when playback resumes.
+    /// Idempotent, so it can be called every update tick.
+    pub fn set_paused(&mut self, paused: bool) {
+        self.paused = paused;
+        // until the first song color arrives the lighting isn't ours to touch
+        if self.last_color.is_none() || self.sent_paused == paused {
             return;
         }
         if let Some(tx) = &self.tx {
-            if tx.send(RgbCommand::Color(r, g, b)).is_ok() {
-                self.last_color = Some((r, g, b));
+            if tx.send(RgbCommand::Paused(paused)).is_ok() {
+                self.sent_paused = paused;
             }
         }
     }
@@ -95,6 +148,38 @@ enum FadeEnd {
     RestoreRequested,
 }
 
+fn to_pair(a: Rgb8, b: Rgb8) -> Pair {
+    ((a.0 as f32, a.1 as f32, a.2 as f32), (b.0 as f32, b.1 as f32, b.2 as f32))
+}
+
+fn effective_target(song: Option<Pair>, paused: bool) -> Pair {
+    if paused {
+        OFF
+    } else {
+        song.unwrap_or(OFF)
+    }
+}
+
+/// Applies the minimum brightness to a song's colors. It happens once, up
+/// front, rather than per fade frame — otherwise fades to and from black jump
+/// to the floor instead of ramping smoothly. The floor covers the pair as a
+/// whole: if either end of the gradient is bright the LEDs read as on, and a
+/// deliberately dark other end (red/black covers) must stay dark rather than
+/// get boosted to gray.
+fn floored(a: Rgb8, b: Rgb8) -> Pair {
+    let (a, b) = to_pair(a, b);
+    let max = a.0.max(a.1).max(a.2).max(b.0.max(b.1).max(b.2));
+    if max <= 0.0 {
+        let f = LED_MIN_BRIGHTNESS;
+        return ((f, f, f), (f, f, f));
+    }
+    if max >= LED_MIN_BRIGHTNESS {
+        return (a, b);
+    }
+    let s = LED_MIN_BRIGHTNESS / max;
+    ((a.0 * s, a.1 * s, a.2 * s), (b.0 * s, b.1 * s, b.2 * s))
+}
+
 fn t_openrgb(rx: Receiver<RgbCommand>, fade_ms: u64) {
     let mut sdk = Sdk::connect();
     let server_seen = sdk.is_some();
@@ -108,28 +193,31 @@ fn t_openrgb(rx: Receiver<RgbCommand>, fade_ms: u64) {
         std::thread::sleep(Duration::from_millis(500));
     }
 
-    let mut current: Option<(f32, f32, f32)> = None;
-    'outer: while let Ok(cmd) = rx.recv() {
-        let mut target = match cmd {
-            RgbCommand::Color(r, g, b) => (r as f32, g as f32, b as f32),
-            RgbCommand::Restore => break,
-        };
-        // apply only the newest of any queued updates
-        loop {
-            match rx.try_recv() {
-                Ok(RgbCommand::Color(r, g, b)) => target = (r as f32, g as f32, b as f32),
-                Ok(RgbCommand::Restore) => break 'outer,
-                Err(_) => break,
+    let mut current: Option<Pair> = None;
+    let mut song: Option<Pair> = None;
+    let mut paused = false;
+    'outer: while let Ok(first) = rx.recv() {
+        // fold in any queued commands so only the newest state is applied
+        let mut cmd = Some(first);
+        while let Some(c) = cmd {
+            match c {
+                RgbCommand::Color(a, b) => song = Some(floored(a, b)),
+                RgbCommand::Paused(p) => paused = p,
+                RgbCommand::Restore => break 'outer,
             }
+            cmd = rx.try_recv().ok();
+        }
+        if song.is_none() {
+            continue;
         }
 
-        // a lost connection is retried on the next color, not every tick
+        // a lost connection is retried on the next command, not every tick
         if sdk.is_none() && server_seen {
             sdk = Sdk::connect();
         }
 
         let end = match &mut sdk {
-            Some(s) => run_fade(s, &rx, &mut current, &mut target, fade_ms),
+            Some(s) => run_fade(s, &rx, &mut current, &mut song, &mut paused, fade_ms),
             None => FadeEnd::SdkFailed,
         };
         match end {
@@ -140,14 +228,16 @@ fn t_openrgb(rx: Receiver<RgbCommand>, fade_ms: u64) {
                     log::warn!("OpenRGB SDK connection lost, reconnecting");
                     sdk = Sdk::connect();
                 }
+                let target = effective_target(song, paused);
                 // one immediate retry over a fresh connection, else the CLI
                 let applied = match &mut sdk {
-                    Some(s) => s.apply(gamma_correct(target)),
+                    Some(s) => s.apply(gamma_correct(target.0), gamma_correct(target.1)),
                     None => false,
                 };
                 if !applied {
                     sdk = None;
-                    let (r, g, b) = gamma_correct(target);
+                    // the CLI sets everything at once, so only the primary is used
+                    let (r, g, b) = gamma_correct(target.0);
                     run_openrgb(&["--color", &format!("{:02X}{:02X}{:02X}", r, g, b)]);
                 }
                 current = Some(target);
@@ -161,12 +251,14 @@ fn t_openrgb(rx: Receiver<RgbCommand>, fade_ms: u64) {
 fn run_fade(
     sdk: &mut Sdk,
     rx: &Receiver<RgbCommand>,
-    current: &mut Option<(f32, f32, f32)>,
-    target: &mut (f32, f32, f32),
+    current: &mut Option<Pair>,
+    song: &mut Option<Pair>,
+    paused: &mut bool,
     fade_ms: u64,
 ) -> FadeEnd {
+    let mut target = effective_target(*song, *paused);
     // no known starting color -> jump straight to the target
-    let mut from = current.unwrap_or(*target);
+    let mut from = current.unwrap_or(target);
     let mut started = Instant::now();
     loop {
         let t = if fade_ms == 0 {
@@ -174,12 +266,8 @@ fn run_fade(
         } else {
             (started.elapsed().as_millis() as f32 / fade_ms as f32).min(1.0)
         };
-        let cur = (
-            from.0 + (target.0 - from.0) * t,
-            from.1 + (target.1 - from.1) * t,
-            from.2 + (target.2 - from.2) * t,
-        );
-        if !sdk.apply(gamma_correct(cur)) {
+        let cur = (lerp(from.0, target.0, t), lerp(from.1, target.1, t));
+        if !sdk.apply(gamma_correct(cur.0), gamma_correct(cur.1)) {
             return FadeEnd::SdkFailed;
         }
         *current = Some(cur);
@@ -187,11 +275,18 @@ fn run_fade(
             return FadeEnd::Completed;
         }
         std::thread::sleep(FADE_TICK);
+        // retarget the fade from wherever it is now
         match rx.try_recv() {
-            Ok(RgbCommand::Color(r, g, b)) => {
-                // retarget the fade from wherever it is now
+            Ok(RgbCommand::Color(a, b)) => {
+                *song = Some(floored(a, b));
                 from = cur;
-                *target = (r as f32, g as f32, b as f32);
+                target = effective_target(*song, *paused);
+                started = Instant::now();
+            }
+            Ok(RgbCommand::Paused(p)) => {
+                *paused = p;
+                from = cur;
+                target = effective_target(*song, *paused);
                 started = Instant::now();
             }
             Ok(RgbCommand::Restore) | Err(TryRecvError::Disconnected) => {
@@ -202,14 +297,20 @@ fn run_fade(
     }
 }
 
-fn gamma_correct((r, g, b): (f32, f32, f32)) -> (u8, u8, u8) {
+fn lerp(from: Rgb, to: Rgb, t: f32) -> Rgb {
+    (
+        from.0 + (to.0 - from.0) * t,
+        from.1 + (to.1 - from.1) * t,
+        from.2 + (to.2 - from.2) * t,
+    )
+}
+
+fn gamma_correct((r, g, b): Rgb) -> Rgb8 {
     let max = r.max(g).max(b);
     if max <= 0.0 {
-        let floor = LED_MIN_BRIGHTNESS as u8;
-        return (floor, floor, floor);
+        return (0, 0, 0);
     }
-    let scale = if max < LED_MIN_BRIGHTNESS { LED_MIN_BRIGHTNESS / max } else { 1.0 };
-    let correct = |c: f32| ((c / max).powf(LED_GAMMA) * max * scale).round().min(255.0) as u8;
+    let correct = |c: f32| ((c / max).powf(LED_GAMMA) * max).round().min(255.0) as u8;
     (correct(r), correct(g), correct(b))
 }
 
@@ -260,7 +361,8 @@ impl Sdk {
         }
     }
 
-    fn apply(&mut self, (r, g, b): (u8, u8, u8)) -> bool {
+    /// Fills each device with a gradient from color `a` to color `b`.
+    fn apply(&mut self, a: Rgb8, b: Rgb8) -> bool {
         for (i, &count) in self.led_counts.iter().enumerate() {
             let result = (|| {
                 if !self.custom_mode_set {
@@ -271,8 +373,10 @@ impl Sdk {
                 let mut payload = Vec::with_capacity(6 + 4 * count);
                 payload.extend_from_slice(&((6 + 4 * count) as u32).to_le_bytes());
                 payload.extend_from_slice(&(count as u16).to_le_bytes());
-                for _ in 0..count {
-                    payload.extend_from_slice(&[r, g, b, 0]);
+                for led in 0..count {
+                    let t = if count > 1 { led as f32 / (count - 1) as f32 } else { 0.0 };
+                    let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+                    payload.extend_from_slice(&[mix(a.0, b.0), mix(a.1, b.1), mix(a.2, b.2), 0]);
                 }
                 send_packet(&mut self.stream, i as u32, PACKET_UPDATE_LEDS, &payload)
             })();

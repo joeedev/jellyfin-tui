@@ -218,6 +218,7 @@ pub struct App {
     config_watcher: crate::themes::theme::ConfigWatcher,
     pub auto_color: bool, // grab color from cover art (coolest feature ever omg)
     pub rgb: crate::rgb::RgbSync, // sync RGB lighting to the album color via OpenRGB
+    pub rgb_two_colors: bool,     // gradient between the album's two main colors
     pub border_type: BorderType,
 
     pub original_artists: Vec<Artist>,     // all artists
@@ -526,6 +527,10 @@ impl App {
                 config.get("openrgb").and_then(|v| v.as_bool()).unwrap_or(true),
                 fade_ms,
             ),
+            rgb_two_colors: config
+                .get("openrgb_two_colors")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
             border_type: match config.get("rounded_corners").and_then(|b| b.as_bool()) {
                 Some(false) => BorderType::Plain,
                 _ => BorderType::Rounded,
@@ -1205,6 +1210,8 @@ impl App {
             .get(self.state.current_playback_state.current_index)
             .cloned()
             .unwrap_or_default();
+
+        self.rgb.set_paused(self.paused);
 
         self.report_progress_if_needed().await?;
         self.handle_lyrics_scroll().await;
@@ -2462,6 +2469,37 @@ impl App {
         }
     }
 
+    /// Picks a second LED color from the palette. color_thief orders the
+    /// palette by how much of the artwork each color covers, so the second
+    /// "main color" is the most prominent one distinct from the primary —
+    /// including black or white backgrounds, which are fair game on LEDs.
+    /// None if everything is too close to the primary for a gradient to show.
+    fn pick_secondary_color(
+        colors: &[color_thief::Color],
+        primary: (u8, u8, u8),
+    ) -> Option<(u8, u8, u8)> {
+        let best = colors
+            .iter()
+            .enumerate()
+            .filter(|(_, color)| {
+                let dr = color.r as i32 - primary.0 as i32;
+                let dg = color.g as i32 - primary.1 as i32;
+                let db = color.b as i32 - primary.2 as i32;
+                dr * dr + dg * dg + db * db >= 2000
+            })
+            .max_by_key(|(i, color)| {
+                // prominence dominates; saturation only tilts near-ties so a
+                // vivid color beats a similarly prominent murky one
+                let prominence = (colors.len() - i) as i32 * 4;
+                let maxc = color.r.max(color.g).max(color.b) as i32;
+                let minc = color.r.min(color.g).min(color.b) as i32;
+                let saturation = if maxc == 0 { 0 } else { (maxc - minc) * 10 / maxc };
+                prominence + saturation
+            })?
+            .1;
+        Some((best.r, best.g, best.b))
+    }
+
     fn grab_primary_color(&mut self, p: &str) {
         if !self.auto_color && !self.rgb.is_active() {
             return;
@@ -2545,8 +2583,14 @@ impl App {
 
             let max_chan = prominent_color.r.max(prominent_color.g).max(prominent_color.b);
             let scale = if max_chan == 0 { 1.0 } else { 255.0 / max_chan as f32 };
-            // LEDs get the raw album color; the scaling below only aids terminal contrast
-            self.rgb.set_color(prominent_color.r, prominent_color.g, prominent_color.b);
+            // LEDs get the raw album colors; the scaling below only aids terminal contrast
+            let primary = (prominent_color.r, prominent_color.g, prominent_color.b);
+            let secondary = if self.rgb_two_colors {
+                Self::pick_secondary_color(&colors, primary).unwrap_or(primary)
+            } else {
+                primary
+            };
+            self.rgb.set_color(primary, secondary);
             if !self.auto_color {
                 return;
             }
