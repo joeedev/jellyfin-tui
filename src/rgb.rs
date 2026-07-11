@@ -23,7 +23,7 @@ always taken before the first color is applied, and a command arriving
 mid-fade retargets the fade from wherever it currently is.
 */
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
@@ -44,8 +44,14 @@ const FADE_TICK: Duration = Duration::from_millis(33);
 
 // OpenRGB SDK packet ids
 const PACKET_SET_CLIENT_NAME: u32 = 50;
+const PACKET_REQUEST_PROTOCOL_VERSION: u32 = 40;
 const PACKET_UPDATE_LEDS: u32 = 1050;
 const PACKET_SET_CUSTOM_MODE: u32 = 1100;
+// Protocol v3 is the newest version supported by the openrgb crate used for
+// controller discovery below. Requesting it explicitly is also important for
+// the raw persistent socket: newer OpenRGB servers may accept a TCP connection
+// but ignore controller writes until the client has negotiated a protocol.
+const SDK_PROTOCOL_VERSION: u32 = 3;
 
 type Rgb = (f32, f32, f32);
 type Rgb8 = (u8, u8, u8);
@@ -346,6 +352,7 @@ impl Sdk {
         let result = (|| {
             let mut stream = TcpStream::connect(SDK_ADDR)?;
             stream.set_nodelay(true)?;
+            negotiate_protocol(&mut stream)?;
             send_packet(&mut stream, 0, PACKET_SET_CLIENT_NAME, b"jellyfin-tui\0")?;
             Ok::<_, std::io::Error>(stream)
         })();
@@ -388,6 +395,51 @@ impl Sdk {
         self.custom_mode_set = true;
         true
     }
+}
+
+/// Negotiate the SDK protocol on the persistent write connection.  The
+/// discovery client above does this on its own connection, but protocol state
+/// belongs to each TCP client.  Skipping it can leave OpenRGB accepting writes
+/// at the socket level while discarding the lighting updates.
+fn negotiate_protocol(stream: &mut TcpStream) -> std::io::Result<()> {
+    send_packet(
+        stream,
+        0,
+        PACKET_REQUEST_PROTOCOL_VERSION,
+        &SDK_PROTOCOL_VERSION.to_le_bytes(),
+    )?;
+
+    let mut header = [0u8; 16];
+    stream.read_exact(&mut header)?;
+    if &header[..4] != b"ORGB" {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "OpenRGB protocol response has an invalid magic value",
+        ));
+    }
+
+    let device_id = u32::from_le_bytes(header[4..8].try_into().unwrap());
+    let packet_id = u32::from_le_bytes(header[8..12].try_into().unwrap());
+    let payload_len = u32::from_le_bytes(header[12..16].try_into().unwrap()) as usize;
+    if device_id != 0 || packet_id != PACKET_REQUEST_PROTOCOL_VERSION || payload_len != 4 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "unexpected OpenRGB protocol response (device={device_id}, packet={packet_id}, bytes={payload_len})"
+            ),
+        ));
+    }
+
+    let mut payload = [0u8; 4];
+    stream.read_exact(&mut payload)?;
+    let negotiated = u32::from_le_bytes(payload);
+    if negotiated == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "OpenRGB negotiated protocol version 0",
+        ));
+    }
+    Ok(())
 }
 
 fn send_packet(
