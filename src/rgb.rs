@@ -46,6 +46,7 @@ const FADE_TICK: Duration = Duration::from_millis(33);
 const PACKET_SET_CLIENT_NAME: u32 = 50;
 const PACKET_REQUEST_PROTOCOL_VERSION: u32 = 40;
 const PACKET_UPDATE_LEDS: u32 = 1050;
+const PACKET_UPDATE_MODE: u32 = 1101;
 const PACKET_SET_CUSTOM_MODE: u32 = 1100;
 // Protocol v3 is the newest version supported by the openrgb crate used for
 // controller discovery below. Requesting it explicitly is also important for
@@ -323,8 +324,18 @@ fn gamma_correct((r, g, b): Rgb) -> Rgb8 {
 /// Persistent connection to a running OpenRGB SDK server.
 struct Sdk {
     stream: TcpStream,
-    led_counts: Vec<usize>,
-    custom_mode_set: bool,
+    devices: Vec<SdkDevice>,
+    modes_initialized: bool,
+}
+
+struct SdkDevice {
+    led_count: usize,
+    /// Fully encoded `RGBControllerUpdateMode` payload for this controller's
+    /// Direct mode. Some controllers (notably MSI Mystic Light) do not switch
+    /// into a writable mode when sent `RGBControllerSetCustomMode`, even though
+    /// the server accepts the packet. Sending the concrete mode is what the
+    /// official OpenRGB client does.
+    direct_mode: Option<Vec<u8>>,
 }
 
 impl Sdk {
@@ -332,17 +343,29 @@ impl Sdk {
         // discover the controller layout with the openrgb crate; reads are the
         // involved part of the protocol and the crate gets them right
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok()?;
-        let led_counts = rt.block_on(async {
+        let devices = rt.block_on(async {
             let client = openrgb::OpenRGB::connect().await?;
             let count = client.get_controller_count().await?;
-            let mut led_counts = Vec::with_capacity(count as usize);
+            let mut devices = Vec::with_capacity(count as usize);
             for i in 0..count {
-                led_counts.push(client.get_controller(i).await?.colors.len());
+                let controller = client.get_controller(i).await?;
+                let direct_mode = controller
+                    .modes
+                    .iter()
+                    .enumerate()
+                    .find(|(_, mode)| mode.name.eq_ignore_ascii_case("direct"))
+                    .or_else(|| {
+                        controller.modes.iter().enumerate().find(|(_, mode)| {
+                            mode.flags.contains(openrgb::data::ModeFlag::HasPerLEDColor)
+                        })
+                    })
+                    .map(|(mode_index, mode)| encode_mode_update(mode_index as i32, mode));
+                devices.push(SdkDevice { led_count: controller.colors.len(), direct_mode });
             }
-            Ok::<_, openrgb::OpenRGBError>(led_counts)
+            Ok::<_, openrgb::OpenRGBError>(devices)
         });
-        let led_counts = match led_counts {
-            Ok(counts) => counts,
+        let devices = match devices {
+            Ok(devices) => devices,
             Err(e) => {
                 log::info!("No OpenRGB SDK server ({}), using the CLI without fading", e);
                 return None;
@@ -359,7 +382,7 @@ impl Sdk {
         match result {
             Ok(stream) => {
                 log::info!("Connected to the OpenRGB SDK server, fading enabled");
-                Some(Self { stream, led_counts, custom_mode_set: false })
+                Some(Self { stream, devices, modes_initialized: false })
             }
             Err(e) => {
                 log::warn!("Failed to connect to the OpenRGB SDK server: {}", e);
@@ -370,11 +393,20 @@ impl Sdk {
 
     /// Fills each device with a gradient from color `a` to color `b`.
     fn apply(&mut self, a: Rgb8, b: Rgb8) -> bool {
-        for (i, &count) in self.led_counts.iter().enumerate() {
+        for (i, device) in self.devices.iter().enumerate() {
             let result = (|| {
-                if !self.custom_mode_set {
-                    send_packet(&mut self.stream, i as u32, PACKET_SET_CUSTOM_MODE, &[])?;
+                if !self.modes_initialized {
+                    if let Some(payload) = &device.direct_mode {
+                        send_packet(&mut self.stream, i as u32, PACKET_UPDATE_MODE, payload)?;
+                    } else {
+                        log::warn!(
+                            "OpenRGB controller {} has no Direct/per-LED mode; trying custom mode",
+                            i
+                        );
+                        send_packet(&mut self.stream, i as u32, PACKET_SET_CUSTOM_MODE, &[])?;
+                    }
                 }
+                let count = device.led_count;
                 // payload: u32 data_size (including itself), u16 count, then
                 // one (r, g, b, pad) per LED
                 let mut payload = Vec::with_capacity(6 + 4 * count);
@@ -392,9 +424,47 @@ impl Sdk {
                 return false;
             }
         }
-        self.custom_mode_set = true;
+        self.modes_initialized = true;
         true
     }
+}
+
+/// Encodes the payload accepted by `RGBControllerUpdateMode`. The first size
+/// includes its own four bytes; openrgb-rs 0.1.2 omits those bytes from this
+/// internal size, which OpenRGB 1.0 validates and rejects.
+fn encode_mode_update(mode_index: i32, mode: &openrgb::data::Mode) -> Vec<u8> {
+    let mut mode_data = Vec::new();
+    push_sdk_string(&mut mode_data, &mode.name);
+    mode_data.extend_from_slice(&mode.value.to_le_bytes());
+    mode_data.extend_from_slice(&mode.flags.bits().to_le_bytes());
+    mode_data.extend_from_slice(&mode.speed_min.unwrap_or_default().to_le_bytes());
+    mode_data.extend_from_slice(&mode.speed_max.unwrap_or_default().to_le_bytes());
+    mode_data.extend_from_slice(&mode.brightness_min.unwrap_or_default().to_le_bytes());
+    mode_data.extend_from_slice(&mode.brightness_max.unwrap_or_default().to_le_bytes());
+    mode_data.extend_from_slice(&mode.colors_min.unwrap_or_default().to_le_bytes());
+    mode_data.extend_from_slice(&mode.colors_max.unwrap_or_default().to_le_bytes());
+    mode_data.extend_from_slice(&mode.speed.unwrap_or_default().to_le_bytes());
+    mode_data.extend_from_slice(&mode.brightness.unwrap_or_default().to_le_bytes());
+    mode_data.extend_from_slice(&(mode.direction.unwrap_or_default() as u32).to_le_bytes());
+    mode_data.extend_from_slice(&(mode.color_mode.unwrap_or_default() as u32).to_le_bytes());
+    mode_data.extend_from_slice(&(mode.colors.len() as u16).to_le_bytes());
+    for color in &mode.colors {
+        mode_data.extend_from_slice(&[color.r, color.g, color.b, 0]);
+    }
+
+    let size = 4 + 4 + mode_data.len();
+    let mut payload = Vec::with_capacity(size);
+    payload.extend_from_slice(&(size as u32).to_le_bytes());
+    payload.extend_from_slice(&mode_index.to_le_bytes());
+    payload.extend_from_slice(&mode_data);
+    payload
+}
+
+fn push_sdk_string(buf: &mut Vec<u8>, value: &str) {
+    let len = value.len() + 1;
+    buf.extend_from_slice(&(len as u16).to_le_bytes());
+    buf.extend_from_slice(value.as_bytes());
+    buf.push(0);
 }
 
 /// Negotiate the SDK protocol on the persistent write connection.  The
@@ -481,4 +551,43 @@ fn openrgb_available() -> bool {
     std::env::var_os("PATH")
         .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join("openrgb").is_file()))
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_mode_update;
+    use openrgb::data::{ColorMode, Mode, ModeFlag};
+
+    #[test]
+    fn direct_mode_packet_matches_openrgb_client_encoding() {
+        let mode = Mode {
+            name: "Direct".to_string(),
+            value: 100,
+            flags: ModeFlag::HasPerLEDColor.into(),
+            speed_min: None,
+            speed_max: None,
+            brightness_min: None,
+            brightness_max: None,
+            speed: None,
+            brightness: None,
+            color_mode: Some(ColorMode::PerLED),
+            colors: vec![],
+            colors_min: None,
+            colors_max: None,
+            direction: None,
+        };
+
+        let payload = encode_mode_update(0, &mode);
+
+        // Captured from OpenRGB 1.0rc3 for the MSI Mystic Light Direct mode.
+        assert_eq!(payload.len(), 67);
+        assert_eq!(&payload[..4], &67_u32.to_le_bytes());
+        assert_eq!(&payload[4..8], &0_i32.to_le_bytes());
+        assert_eq!(&payload[8..17], b"\x07\x00Direct\0");
+        assert_eq!(&payload[17..21], &100_i32.to_le_bytes());
+        assert_eq!(&payload[21..25], &(1_u32 << 5).to_le_bytes());
+        assert!(payload[25..61].iter().all(|&byte| byte == 0));
+        assert_eq!(&payload[61..65], &1_u32.to_le_bytes());
+        assert_eq!(&payload[65..], &0_u16.to_le_bytes());
+    }
 }
