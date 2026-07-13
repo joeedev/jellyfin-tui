@@ -217,8 +217,8 @@ pub struct App {
     tab_labels: [String; 4],
     config_watcher: crate::themes::theme::ConfigWatcher,
     pub auto_color: bool, // grab color from cover art (coolest feature ever omg)
-    pub rgb: crate::rgb::RgbSync, // sync RGB lighting to the album color via OpenRGB
-    pub rgb_two_colors: bool,     // gradient between the album's two main colors
+    pub rgb: crate::rgb::RgbSync, // sync fan lighting to the album color via PitRGB
+    pub rgb_two_colors: bool,     // split fans between the album's two main colors
     pub border_type: BorderType,
 
     pub original_artists: Vec<Artist>,     // all artists
@@ -524,11 +524,20 @@ impl App {
             config_watcher,
             auto_color,
             rgb: crate::rgb::RgbSync::new(
-                config.get("openrgb").and_then(|v| v.as_bool()).unwrap_or(true),
-                fade_ms,
+                config.get("pitrgb").and_then(|v| v.as_bool()).unwrap_or(true),
+                config
+                    .get("pitrgb_socket")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("/run/pitrgb/control.sock")
+                    .into(),
+                config
+                    .get("pitrgb_layer")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u32::try_from(v).ok())
+                    .unwrap_or(10),
             ),
             rgb_two_colors: config
-                .get("openrgb_two_colors")
+                .get("pitrgb_two_colors")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true),
             border_type: match config.get("rounded_corners").and_then(|b| b.as_bool()) {

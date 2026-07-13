@@ -135,13 +135,16 @@ art: true
 persist: true
 # Grab the primary color from the cover image (false => uses the current theme's `accent` instead)
 auto_color: true
-# Time in milliseconds to fade between colors when the track changes
+# Time in milliseconds to fade the UI colors when the track changes
 auto_color_fade_ms: 400
-# Sync RGB lighting to the album color if OpenRGB is installed
-# (off while paused, restored on exit)
-openrgb: true
-# Blend the album's two main colors across each device (false => one solid color)
-openrgb_two_colors: true
+# Sync fan lighting to the album color if PitRGB is running
+# (the layer is released while paused and on exit)
+pitrgb: true
+# PitRGB socket and layer used by jellyfin-tui
+pitrgb_socket: /run/pitrgb/control.sock
+pitrgb_layer: 10
+# Split the fans between the album's two main colors (false => one solid color)
+pitrgb_two_colors: true
 # Always show the lyrics pane, even if no lyrics are available
 lyrics: 'always' # options: 'always', 'never', 'auto'
 
