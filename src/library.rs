@@ -1870,8 +1870,8 @@ impl App {
             } else {
                 vec![
                     Constraint::Percentage(5),
-                    Constraint::Percentage(86),
-                    Constraint::Length(0),
+                    Constraint::Percentage(71),
+                    Constraint::Percentage(15),
                     Constraint::Percentage(9),
                 ]
             })
