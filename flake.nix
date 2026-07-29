@@ -30,9 +30,12 @@
           stdenv,
           rustPlatform,
           pkg-config,
+          makeWrapper,
           openssl,
           mpv,
           sqlite,
+          cava,
+          pulseaudio,
           writableTmpDirAsHomeHook,
         }:
         rustPlatform.buildRustPackage {
@@ -45,6 +48,7 @@
               ./Cargo.toml
               ./Cargo.lock
               ./src
+              ./crates
             ];
           };
 
@@ -52,12 +56,17 @@
             lockFile = ./Cargo.lock;
           };
 
-          nativeBuildInputs = [ pkg-config ];
+          nativeBuildInputs = [
+            pkg-config
+            makeWrapper
+          ];
 
           buildInputs = [
             openssl
             mpv
             sqlite
+            cava
+            pulseaudio
           ];
 
           nativeInstallCheckInputs = [ writableTmpDirAsHomeHook ];
@@ -72,6 +81,11 @@
           postInstall = lib.optionalString stdenv.hostPlatform.isLinux ''
             install -Dm644 src/extra/jellyfin-tui.desktop $out/share/applications/jellyfin-tui.desktop
           '';
+
+          postFixup = ''
+            wrapProgram $out/bin/jellyfin-tui \
+              --prefix PATH : ${lib.makeBinPath [ cava pulseaudio ]}
+          '';
         };
 
       inherit (nixpkgs) lib;
@@ -83,7 +97,12 @@
           let
             pkgs = import nixpkgs {
               inherit system;
-              overlays = [ (import rust-overlay) ];
+              overlays = [
+                (import rust-overlay)
+                (final: prev: {
+                  iniparser = prev.iniparser.overrideAttrs (_: { doCheck = false; });
+                })
+              ];
             };
             toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
           in
@@ -130,6 +149,8 @@
               openssl
               mpv
               sqlite
+              cava
+              pulseaudio
               pkg-config
             ];
             env = {

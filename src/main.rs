@@ -13,6 +13,7 @@ mod player;
 mod playlists;
 mod popup;
 mod queue;
+mod rgb;
 mod search;
 mod sort;
 mod themes;
@@ -164,6 +165,7 @@ async fn main() {
             log::error!("Draw error: {}", e);
         }
     }
+    app.rgb.shutdown();
     if panicked.load(Ordering::SeqCst) {
         return;
     }

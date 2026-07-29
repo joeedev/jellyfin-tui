@@ -218,6 +218,8 @@ pub struct App {
     tab_labels: [String; 4],
     config_watcher: crate::themes::theme::ConfigWatcher,
     pub auto_color: bool, // grab color from cover art (coolest feature ever omg)
+    pub rgb: crate::rgb::RgbSync, // sync fan lighting to the album color via PitRGB
+    pub rgb_two_colors: bool, // split fans between the album's two main colors
     pub border_type: BorderType,
 
     pub original_artists: Vec<Artist>,     // all artists
@@ -429,7 +431,7 @@ impl App {
         ));
 
         // connect to mpv, set options and default properties
-        let mpv_handle = MpvHandle::new(&config, sender);
+        let mpv_handle = MpvHandle::new(&config, sender, None);
 
         let (controls, mpris_rx) = crate::mpris::init_media_controls().await;
 
@@ -493,6 +495,8 @@ impl App {
             _ => (true, default_title_fmt.to_string()),
         };
 
+        let fade_ms = config.get("auto_color_fade_ms").and_then(|v| v.as_u64()).unwrap_or(500);
+
         Self {
             exit: false,
             dirty: true,
@@ -516,10 +520,7 @@ impl App {
             theme,
             themes: user_themes,
             last_theme_lerp: Instant::now(),
-            auto_color_fade_ms: config
-                .get("auto_color_fade_ms")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(500),
+            auto_color_fade_ms: fade_ms,
 
             config: config.clone(),
             keymap,
@@ -528,6 +529,23 @@ impl App {
             tab_labels,
             config_watcher,
             auto_color,
+            rgb: crate::rgb::RgbSync::new(
+                config.get("pitrgb").and_then(|v| v.as_bool()).unwrap_or(true),
+                config
+                    .get("pitrgb_socket")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("/run/pitrgb/control.sock")
+                    .into(),
+                config
+                    .get("pitrgb_layer")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u32::try_from(v).ok())
+                    .unwrap_or(10),
+            ),
+            rgb_two_colors: config
+                .get("pitrgb_two_colors")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
             border_type: match config.get("rounded_corners").and_then(|b| b.as_bool()) {
                 Some(false) => BorderType::Plain,
                 _ => BorderType::Rounded,
@@ -1221,6 +1239,8 @@ impl App {
             .cloned()
             .unwrap_or_default();
 
+        self.rgb.set_paused(self.paused);
+
         self.report_progress_if_needed().await?;
         self.flush_debounced_requests().await;
         self.handle_auto_browse().await;
@@ -1846,8 +1866,7 @@ impl App {
                     if let Ok(reader) = image::ImageReader::open(&p) {
                         if let Ok(img) = reader.decode() {
                             if let Some(picker) = &mut self.picker {
-                                let image_fit_state = picker.new_resize_protocol(img.clone());
-                                self.cover_art = Some(image_fit_state);
+                                self.cover_art = Some(picker.new_resize_protocol(img.clone()));
                                 self.cover_art_path = p.clone();
                             }
                             self.grab_primary_color(&p);
@@ -1881,8 +1900,7 @@ impl App {
             if let Ok(reader) = image::ImageReader::open(&cover_path) {
                 if let Ok(img) = reader.decode() {
                     if let Some(picker) = &mut self.picker {
-                        let image_fit_state = picker.new_resize_protocol(img.clone());
-                        self.cover_art = Some(image_fit_state);
+                        self.cover_art = Some(picker.new_resize_protocol(img.clone()));
                     }
                 }
             }
@@ -2022,7 +2040,6 @@ impl App {
             }
             return;
         }
-
         let app_container = Layout::default()
             .direction(Direction::Vertical)
             .constraints(vec![Constraint::Min(1), Constraint::Percentage(100)])
@@ -2186,15 +2203,6 @@ impl App {
 
         status_bar.push(Span::raw(repeat_indicator).fg(self.theme.resolve(&self.theme.foreground)));
 
-        let volume_color = match self.state.current_playback_state.volume {
-            0..=100 => (
-                self.theme.resolve(&self.theme.foreground),
-                self.theme.resolve(&self.theme.progress_fill),
-            ),
-            101..=120 => (Color::Yellow, Color::Yellow),
-            _ => (Color::Red, Color::Red),
-        };
-
         let mut spaced = Vec::new();
         let mut iterator = status_bar.into_iter();
         if let Some(first) = iterator.next() {
@@ -2213,6 +2221,15 @@ impl App {
             .wrap(Wrap { trim: false })
             .style(Style::default().add_modifier(dim_mod))
             .render(status_area, buf);
+
+        let volume_color = match self.state.current_playback_state.volume {
+            0..=100 => (
+                self.theme.resolve(&self.theme.foreground),
+                self.theme.resolve(&self.theme.progress_fill),
+            ),
+            101..=120 => (Color::Yellow, Color::Yellow),
+            _ => (Color::Red, Color::Red),
+        };
 
         LineGauge::default()
             .block(Block::default().padding(Padding::horizontal(1)))
@@ -2698,8 +2715,39 @@ impl App {
         }
     }
 
+    /// Picks a second LED color from the palette. color_thief orders the
+    /// palette by how much of the artwork each color covers, so the second
+    /// "main color" is the most prominent one distinct from the primary —
+    /// including black or white backgrounds, which are fair game on LEDs.
+    /// None if everything is too close to the primary for a gradient to show.
+    fn pick_secondary_color(
+        colors: &[color_thief::Color],
+        primary: (u8, u8, u8),
+    ) -> Option<(u8, u8, u8)> {
+        let best = colors
+            .iter()
+            .enumerate()
+            .filter(|(_, color)| {
+                let dr = color.r as i32 - primary.0 as i32;
+                let dg = color.g as i32 - primary.1 as i32;
+                let db = color.b as i32 - primary.2 as i32;
+                dr * dr + dg * dg + db * db >= 2000
+            })
+            .max_by_key(|(i, color)| {
+                // prominence dominates; saturation only tilts near-ties so a
+                // vivid color beats a similarly prominent murky one
+                let prominence = (colors.len() - i) as i32 * 4;
+                let maxc = color.r.max(color.g).max(color.b) as i32;
+                let minc = color.r.min(color.g).min(color.b) as i32;
+                let saturation = if maxc == 0 { 0 } else { (maxc - minc) * 10 / maxc };
+                prominence + saturation
+            })?
+            .1;
+        Some((best.r, best.g, best.b))
+    }
+
     fn grab_primary_color(&mut self, p: &str) {
-        if !self.auto_color {
+        if !self.auto_color && !self.rgb.is_active() {
             return;
         }
         let img = match image::open(p) {
@@ -2781,6 +2829,18 @@ impl App {
 
             let max_chan = prominent_color.r.max(prominent_color.g).max(prominent_color.b);
             let scale = if max_chan == 0 { 1.0 } else { 255.0 / max_chan as f32 };
+            // LEDs get the raw album colors; the scaling below only aids terminal contrast
+            let primary = (prominent_color.r, prominent_color.g, prominent_color.b);
+            let secondary = if self.rgb_two_colors {
+                Self::pick_secondary_color(&colors, primary).unwrap_or(primary)
+            } else {
+                primary
+            };
+            self.rgb.set_color(primary, secondary);
+            if !self.auto_color {
+                return;
+            }
+
             let mut r = (prominent_color.r as f32 * scale) as u8;
             let mut g = (prominent_color.g as f32 * scale) as u8;
             let mut b = (prominent_color.b as f32 * scale) as u8;

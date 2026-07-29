@@ -245,7 +245,6 @@ impl App {
         }
         self.mpv_handle.set_repeat(self.preferences.repeat).await;
         let _ = self.preferences.save().log_err("save preferences");
-
         if let Some(ref controls) = self.controls {
             controls.update(media_controls::NowPlaying::new().loop_status(loop_status));
         }
