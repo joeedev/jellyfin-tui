@@ -263,6 +263,7 @@ pub struct App {
     pub help_search: String,
     pub help_searching: bool,
     pub zen_mode: bool,
+    pub zen_controls_until: Option<Instant>,
     pub zen_mode_timeout: Option<Duration>,
     pub search_term: String,
     pub search_term_last: String,
@@ -616,6 +617,7 @@ impl App {
             searching: false,
             show_help: false,
             zen_mode: false,
+            zen_controls_until: None,
             search_term: String::from(""),
             search_term_last: String::from(""),
             help_search: String::from(""),
@@ -1281,6 +1283,11 @@ impl App {
         if now.duration_since(self.last_spinner_tick).as_millis() >= 750 {
             self.last_spinner_tick = now;
             self.spinner = (self.spinner + 1) % self.spinner_stages.len();
+            self.dirty = true;
+        }
+
+        if self.zen_controls_until.is_some_and(|until| now >= until) {
+            self.zen_controls_until = None;
             self.dirty = true;
         }
 

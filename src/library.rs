@@ -25,6 +25,7 @@ use ratatui::{
     Frame,
 };
 use ratatui_image::{Resize, StatefulImage};
+use tokio::time::Instant;
 
 impl App {
     pub fn render_home(&mut self, app_container: Rect, frame: &mut Frame) {
@@ -1862,18 +1863,16 @@ impl App {
             .constraints(if has_lyrics {
                 vec![
                     Constraint::Percentage(5),
-                    Constraint::Percentage(55),
-                    Constraint::Percentage(25),
-                    Constraint::Percentage(10),
-                    Constraint::Percentage(5),
+                    Constraint::Percentage(71),
+                    Constraint::Percentage(15),
+                    Constraint::Percentage(9),
                 ]
             } else {
                 vec![
                     Constraint::Percentage(5),
-                    Constraint::Percentage(65),
-                    Constraint::Percentage(15),
-                    Constraint::Percentage(10),
-                    Constraint::Percentage(5),
+                    Constraint::Percentage(86),
+                    Constraint::Length(0),
+                    Constraint::Percentage(9),
                 ]
             })
             .split(area);
@@ -1887,7 +1886,9 @@ impl App {
                 Constraint::Min(15),
             ])
             .split(top_bar_area);
-        self.render_status_bar(top_bar_layout[1], top_bar_layout[2], frame.buffer_mut(), true);
+        if self.zen_controls_until.is_some_and(|until| until > Instant::now()) {
+            self.render_status_bar(top_bar_layout[1], top_bar_layout[2], frame.buffer_mut(), true);
+        }
 
         let cover_area = vertical[1];
 
@@ -1916,75 +1917,30 @@ impl App {
 
         let song_info_area = vertical[2];
 
-        let lines: Vec<Line> = match current_song {
-            Some(song) => {
-                let title = Line::from(vec![Span::styled(
-                    &song.name,
-                    Style::default()
-                        .fg(self.theme.resolve(&self.theme.foreground))
-                        .add_modifier(Modifier::BOLD),
-                )])
-                .centered();
+        let lines: Vec<Line> = self
+            .lyrics
+            .as_ref()
+            .filter(|(_, lyrics, time_synced)| *time_synced && !lyrics.is_empty())
+            .map(|(_, lyrics, _)| {
+                let current_idx = self.state.current_lyric;
+                let start_idx = current_idx.saturating_sub(1);
+                let end_idx = std::cmp::min(start_idx + 3, lyrics.len());
 
-                let artists = Line::from(vec![Span::styled(
-                    song.artists.join(", "),
-                    Style::default().fg(self.theme.resolve(&self.theme.foreground_secondary)),
-                )])
-                .centered();
-
-                let album = if song.production_year > 0 {
-                    Line::from(vec![
-                        Span::styled(
-                            &song.album,
-                            Style::default().fg(self.theme.resolve(&self.theme.foreground_dim)),
-                        ),
-                        Span::styled(
-                            format!(" ({})", song.production_year),
-                            Style::default().fg(self.theme.resolve(&self.theme.foreground_dim)),
-                        ),
-                    ])
-                    .centered()
-                } else {
-                    Line::from(vec![Span::styled(
-                        &song.album,
-                        Style::default().fg(self.theme.resolve(&self.theme.foreground_dim)),
-                    )])
-                    .centered()
-                };
-
-                let mut result = vec![title, artists, album];
-
-                if let Some((_, lyrics, time_synced)) = &self.lyrics {
-                    if *time_synced && !lyrics.is_empty() {
-                        result.push(Line::from("").centered());
-
-                        let current_idx = self.state.current_lyric;
-
-                        let start_idx = if current_idx > 0 { current_idx - 1 } else { 0 };
-                        let end_idx = std::cmp::min(start_idx + 3, lyrics.len());
-
-                        for i in start_idx..end_idx {
-                            let lyric = &lyrics[i];
-                            let style = if i == current_idx {
-                                Style::default()
-                                    .fg(self.theme.resolve(&self.theme.foreground))
-                                    .add_modifier(Modifier::BOLD)
-                            } else {
-                                Style::default().fg(self.theme.resolve(&self.theme.foreground_dim))
-                            };
-                            result.push(
-                                Line::from(vec![Span::styled(&lyric.text, style)]).centered(),
-                            );
-                        }
-                    }
-                }
-
-                result
-            }
-            None => vec![Line::from("No track playing")
-                .fg(self.theme.resolve(&self.theme.foreground))
-                .centered()],
-        };
+                (start_idx..end_idx)
+                    .map(|i| {
+                        let lyric = &lyrics[i];
+                        let style = if i == current_idx {
+                            Style::default()
+                                .fg(self.theme.resolve(&self.theme.foreground))
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(self.theme.resolve(&self.theme.foreground_dim))
+                        };
+                        Line::from(vec![Span::styled(&lyric.text, style)]).centered()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let content_height = lines.len() as u16;
         let centered_info = Rect {
@@ -2084,24 +2040,5 @@ impl App {
                 .style(Style::default().fg(self.theme.resolve(&self.theme.foreground))),
             progress_layout[1],
         );
-
-        let hint_area = vertical[4];
-        let hint = Line::from(vec![
-            " Exit ".fg(self.theme.resolve(&self.theme.foreground)),
-            "<Esc>".fg(self.theme.primary_color).bold(),
-            " Play/Pause ".fg(self.theme.resolve(&self.theme.foreground)),
-            "<Space>".fg(self.theme.primary_color).bold(),
-            " Next ".fg(self.theme.resolve(&self.theme.foreground)),
-            "<N>".fg(self.theme.primary_color).bold(),
-            " Prev ".fg(self.theme.resolve(&self.theme.foreground)),
-            "<Shift+N>".fg(self.theme.primary_color).bold(),
-            " Seek ".fg(self.theme.resolve(&self.theme.foreground)),
-            "<← →>".fg(self.theme.primary_color).bold(),
-            " Vol ".fg(self.theme.resolve(&self.theme.foreground)),
-            "<+/->".fg(self.theme.primary_color).bold(),
-        ])
-        .centered();
-
-        frame.render_widget(Paragraph::new(hint), hint_area);
     }
 }

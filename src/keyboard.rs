@@ -32,8 +32,10 @@ use serde::{Deserialize, Serialize};
 use std::io;
 use std::time::Duration;
 use strum_macros::EnumIter;
+use tokio::time::Instant;
 
 pub const SEARCH_TRACK_PAGE_SIZE: u64 = 50;
+const ZEN_CONTROLS_DISPLAY_DURATION: Duration = Duration::from_secs(2);
 
 #[derive(EnumIter, Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Action {
@@ -426,6 +428,12 @@ pub fn try_load_keymap(
 }
 
 impl App {
+    fn flash_zen_controls(&mut self) {
+        if self.zen_mode {
+            self.zen_controls_until = Some(Instant::now() + ZEN_CONTROLS_DISPLAY_DURATION);
+        }
+    }
+
     /// Poll for events and handle them
     pub async fn process_terminal_events(&mut self) -> io::Result<()> {
         let idle_ms = self.recent_input_activity.elapsed().as_millis();
@@ -568,7 +576,10 @@ impl App {
 
         if self.zen_mode {
             match action {
-                Action::Cancel | Action::ZenMode => self.zen_mode = false,
+                Action::Cancel | Action::ZenMode => {
+                    self.zen_mode = false;
+                    self.zen_controls_until = None;
+                }
                 Action::Quit => self.exit().await,
                 Action::PlayPause => match self.paused {
                     true => self.play().await,
@@ -577,7 +588,27 @@ impl App {
                 Action::Next => self.next().await,
                 Action::Previous => self.previous().await,
                 Action::Seek(secs) => self.execute_seek(*secs).await,
-                Action::Volume(delta) => self.volume_delta(*delta).await,
+                Action::Volume(delta) => {
+                    self.volume_delta(*delta).await;
+                    self.flash_zen_controls();
+                }
+                Action::Repeat => {
+                    self.cycle_repeat_mode().await;
+                    self.flash_zen_controls();
+                }
+                Action::CycleRadio => {
+                    self.cycle_radio().await;
+                    self.flash_zen_controls();
+                }
+                Action::Shuffle => {
+                    self.toggle_shuffle().await;
+                    self.flash_zen_controls();
+                }
+                Action::ToggleTranscode => {
+                    self.toggle_transcoding().await;
+                    self.flash_zen_controls();
+                }
+                Action::Enter => self.execute_primary_action().await,
 
                 Action::Up => {}
                 Action::Down => {}
@@ -670,7 +701,10 @@ impl App {
             Action::Popup => self.request_popup(false).await,
             Action::GlobalPopup => self.request_popup(true).await,
             Action::CycleRadio => self.cycle_radio().await,
-            Action::ZenMode => self.zen_mode = true,
+            Action::ZenMode => {
+                self.zen_mode = true;
+                self.zen_controls_until = None;
+            }
             // noops
             Action::DeleteBack => {}
             Action::Type(_) => {}
