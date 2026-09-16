@@ -1,7 +1,9 @@
 #![cfg_attr(target_os = "macos", allow(unexpected_cfgs))]
+mod album_groups;
 mod client;
 mod config;
 mod database;
+mod discography;
 mod discord;
 mod help;
 mod helpers;
@@ -15,9 +17,13 @@ mod popup;
 mod queue;
 mod rgb;
 mod search;
+mod select;
 mod sort;
+#[cfg(test)]
+mod tests;
 mod themes;
 mod tui;
+mod ui;
 
 use dirs::data_dir;
 use flexi_logger::{FileSpec, Logger};
@@ -62,6 +68,15 @@ async fn main() {
         }
     }
 
+    // before the lock file, which lives in the data directory this creates
+    match config::prepare_directories() {
+        Ok(_) => {}
+        Err(e) => {
+            println!(" ! Creating directories failed. This is a system error, please report your environment and the following error {}:", e);
+            std::process::exit(1);
+        }
+    }
+
     let _lockfile = check_single_instance();
 
     let offline = args.contains(&String::from("--offline"));
@@ -100,14 +115,6 @@ async fn main() {
         eprintln!(" ! If you think this is a bug, please report it at https://github.com/dhonus/jellyfin-tui/issues");
     }));
 
-    match config::prepare_directories() {
-        Ok(_) => {}
-        Err(e) => {
-            println!(" ! Creating directories failed. This is a system error, please report your environment and the following error {}:", e);
-            std::process::exit(1);
-        }
-    }
-
     let data_dir = dirs::data_dir().expect("! Could not find data directory").join("jellyfin-tui");
 
     let _logger = Logger::try_with_env_or_str("info,zbus=error,discord_rich_presence=error")
@@ -128,7 +135,11 @@ async fn main() {
 
     log::info!("jellyfin-tui {} started", version);
 
-    config::initialize_config();
+    tokio::task::spawn_blocking(|| {
+        config::initialize_config();
+    })
+    .await
+    .expect("spawn_blocking for initialize_config panicked");
 
     let mut app = tui::App::new(offline, force_server_select).await;
     if let Err(e) = app.load_state().await {
@@ -146,7 +157,16 @@ async fn main() {
 
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout())).unwrap();
 
-    terminal.clear().unwrap();
+    if let Err(e) = tui::clear_terminal(&mut terminal) {
+        log::warn!("Could not clear the terminal on startup: {}", e);
+    }
+
+    app.terminal = Some(terminal);
+
+    // starting on Albums never goes through set_tab
+    if app.state.active_tab == keyboard::ActiveTab::Albums {
+        app.hint_album_views();
+    }
 
     loop {
         // main event loop
@@ -161,7 +181,7 @@ async fn main() {
             break;
         }
         // draw() renders the app state to the terminal
-        if let Err(e) = app.draw(&mut terminal).await {
+        if let Err(e) = app.draw().await {
             log::error!("Draw error: {}", e);
         }
     }
@@ -176,7 +196,7 @@ fn check_single_instance() -> File {
     let runtime_dir = match data_dir() {
         Some(dir) => dir.join("jellyfin-tui.lock"),
         None => {
-            println!("Could not find runtime directory");
+            println!(" ! Could not find the data directory to put the lock file in");
             std::process::exit(1);
         }
     };
@@ -190,7 +210,7 @@ fn check_single_instance() -> File {
     {
         Ok(f) => f,
         Err(e) => {
-            println!("Failed to open lock file: {}", e);
+            println!(" ! Failed to open lock file {}: {}", runtime_dir.display(), e);
             std::process::exit(1);
         }
     };
